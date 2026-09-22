@@ -4,12 +4,19 @@ Fog of War chess engine. Kong Ming (aka Zhuge Liang) is the greatest military st
 ### Development Plan
 1. Rules. FoW rules extension to chess python package. All rules are the same as regular chess except:
    - a. move representation from one side point of view: e.g. ? (no information), *xe4 (something takes e4 square), *h4 (something occupies h4 square)
+      - not needed as board state representation is enough.
    - b. board state representation from each side point of view: empty string (still for known empty square), ? (unknown), * (something occupies this square)
    - c. checkmate: no more checkmate, need to capture king directly
    - d. castle: always allowed, no more restriction
 
-2. Probability model. The most important part of the game is to guess where opponent pieces are based on known information. It's depending on historical move stacks. For unknown opponent's move, we need to assign a probability score on each move based on minmax evaluation score or heuristics.
-   - a. as there are so many possible states after a few moves, is there a way to prune or optimize like alpha-beta pruning?
+2. Probability model. The most important part of the game is to deduct and guess where opponent pieces are based on known information. After a few moves, the invisible parts can have billions of possible states. So instead of storing probability/possibility of each board state, we store probability/possibility of each piece and calculate probability/possibility of states that we need later.
+
+Build Algorithm:
+   - Initial known state
+   - After each opponent move, for pieces in dark, store next legal move states from previous possible states (increment). After a few moves, the data should be like {Knight1: {0: set(b1), 1: set(a3, c3), 2: set(a4, b5, c4, d5, e4)}, PawnA: {0: set(a2), 1: set(a3, a4), 2: set(a4, a5)}, ...}. 1 and 2 are move counts from last time seen the piece.
+   - Whenever see the piece, reset the dict of the piece to {0: set(observed square)}, and no need to increment other pieces.
+   - Dependency between pieces: for example Q/B/R requires path is cleared from its own pieces. Take it as consideration.
+   - When opponent recaptures our piece but we don't know what recaptured, only increment pieces that are possible to do so.
 
 3. Optimization (minimax model with alpha-beta pruning). The basic tree based minimax algorithm works the same for FoW chess.
    - a. heuristics (as terminal evaluation): besides regular piece activity, information is also important factor.
