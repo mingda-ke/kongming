@@ -13,19 +13,22 @@ from static import (
 )
 
 
-# TODO: this class may not be necessary, as we can just use BoardView directly.
-# but we still like to have it to resemble how human thinks.
 @dataclass(frozen=True)
 class FogMove:
-    """Move derived from consecutive BoardView states, allowing unknown from/to squares and piece types."""
+    """Move derived from consecutive FogView states, allowing unknown from/to squares and piece types."""
 
     from_square: chess.Square | None = None
     to_square: chess.Square | None = None
     piece: chess.Piece | None = None
 
+    @property
+    def is_invisible(self) -> bool:
+        """The move happened entirely out of sight: nothing about it is known."""
+        return self.from_square is None and self.to_square is None and self.piece is None
 
-class BoardView:
-    """A per-side FoW view container that stores only square states."""
+
+class FogView:
+    """A per-side FoW view represent INVISIBLE_PIECE, EMPTY_SQUARE, BLOCKED_PIECE or visible Piece for each square."""
 
     def __init__(self, color: chess.Color, values: List[int | Piece]):
         """color as White means from white's perspective."""
@@ -55,19 +58,20 @@ class BoardView:
         return "".join(builder)
 
 
-def derive_opponent_move(before: BoardView, after: BoardView) -> FogMove | None:
+def deduce_opponent_move(before: FogView, after: FogView) -> FogMove:
     """
-    Deduce opponent move from two consecutive BoardView snapshots by opponent move, i.e. opposite color of both BoardView color.
+    Deduce opponent move from two consecutive FogView snapshots by opponent move, i.e. opposite color of both FogView color.
     This seems intuitive when human looks at this, but it's actually tricky to implement. For example, discovered move (one piece move and the piece behind it becomes visible).
     So we need to find a "cause" move that results in all changes of visibility. If a knight in front of bishop moves, the bishop becomes visible and knight becomes invisible, we need to deduce that the knight moves away instead of bishop moves in.
     """
+    # TODO: need a bit refactor. further distinguish piece -> empty vs piece -> invisible (and the other way around).
     changed = {
         square
         for square in chess.SQUARES
         if before.values[square] != after.values[square]
     }
     if not changed:
-        return None
+        return FogMove()
 
     # Opponent capture move, i.e. our own piece is lost.
     our_own_lost = [
