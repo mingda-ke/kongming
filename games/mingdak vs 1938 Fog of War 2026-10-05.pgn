@@ -1,0 +1,48 @@
+[GameNr "109668461"]
+[TimeControl "3+2"]
+[Variant "Fog of War"]
+[RuleVariants "EnPassant FogOfWar Play4Mate"]
+[White "mingdak"]
+[WhiteElo "2093"]
+[Black "farzana-A"]
+[BlackElo "1938"]
+[Result "1-0"]
+[Termination "Black forfeits on time • 1-0"]
+[Site "www.chess.com/variants/fog-of-war/game/109668461"]
+[Date "Mon Oct 05 2026 01:47:30 GMT+0000 (Coordinated Universal Time)"]
+
+
+1. e2e4 e7e6
+2. Bf1c4 Ng8f6
+3. Ng1f3 g7g6
+4. Nb1c3 Bf8g7
+5. d2d3 Ke8g8
+6. a2a3 Nf6e8
+7. Bc4a2 c7c6
+8. Bc1e3 f7f5
+9. Qd1d2 Kg8h8
+10. Be3g5 Ne8f6
+11. e4f5 e6f5
+12. Ke1c1 Qd8b6
+13. Rh1e1 d7d5
+14. Bg5h6 Bg7h6
+15. Qd2h6 Nf6d7
+16. Qh6g5 Nd7e5
+17. Nf3e5 Qb6d4
+18. f2f4 a7a5
+19. Qg5h4 Rf8e8
+20. Qh4f2 Qd4f2
+21. d3d4 Qf2h4
+22. g2g3 Qh4f6
+23. h2h3 Kh8g7
+24. g3g4 Nb8a6
+25. Re1g1 b7b5
+26. g4f5 Bc8f5
+27. Rg1g5 b5b4
+28. Nc3b1 Kg7h8
+29. Ba2b3 b4a3
+30. Nb1a3 a5a4
+31. Bb3a2 c6c5
+32. d4c5 Na6c5
+33. Ba2d5 Ra8b8
+34. Rd1d2  1-0

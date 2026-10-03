@@ -1,6 +1,7 @@
 import chess
 
-from fow_chess import FoWChessBoard, FoWRulesBoard
+from fow_chess import FoWChessBoard
+from fow_rules import FoWRulesBoard
 
 KINGSIDE = chess.Move.from_uci("e1g1")
 QUEENSIDE = chess.Move.from_uci("e1c1")

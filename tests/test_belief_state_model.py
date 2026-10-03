@@ -1,6 +1,6 @@
 import chess
 
-from belief_state_model import BeliefStateModel, Simulation, fits, convert_score_to_probability
+from belief_state_model import BeliefStateModel, Simulation, is_fog_move_aligned, convert_score_to_probability
 from evaluator import Evaluator
 from fow_chess import FoWChessBoard
 from fow_view import FogMove
@@ -30,7 +30,7 @@ def new_model(**options) -> BeliefStateModel:
 
 def test_simulations_are_allowed_by_the_tracking_and_keep_the_real_board():
     # with the fake engine all moves score equal, so consider all of them
-    model = new_model(sizes=(20, 3), top_k=40)
+    model = new_model(sizes=(20, 3), num_of_top_moves=40)
     board = follow(model, ["e2e4", "g8f6", "d2d4", "b8c6"])
     assert 0 < len(model.simulations) <= 20
     assert all(model.tracking.allows(simulation.board) for simulation in model.simulations)
@@ -50,7 +50,7 @@ def test_every_simulation_carries_the_opponent_belief_until_the_recursion_ends()
 
 def test_opponent_belief_does_not_know_our_unseen_move():
     """White's Nh3 is out of black's sight, so on the real board his belief keeps the knight on g1 possible."""
-    model = new_model(sizes=(20, 3), top_k=40)
+    model = new_model(sizes=(20, 3), num_of_top_moves=40)
     board = follow(model, ["g1h3", "a7a6"])
     real = next(simulation for simulation in model.simulations if simulation.board.board_fen() == board.board_fen())
     knight = SpecificPiece(chess.WHITE, chess.KNIGHT, 6)
@@ -74,8 +74,8 @@ def test_refill_keeps_the_boards_stronger_for_the_opponent_with_the_closest_dono
     follow(model, ["e2e4", "g8f6"])
     kept = model.simulations[0]
     model.simulations = [kept]
-    # score boards by the opponent's material so the boards differ in strength
-    model.evaluator.score = lambda board, color: len(board.pieces(chess.KNIGHT, color)) + board.fullmove_number
+    # score boards by the opponent's (Black's) material so the boards differ in strength; scores are White's
+    model.evaluator.score = lambda board: -len(board.pieces(chess.KNIGHT, chess.BLACK)) - board.fullmove_number
     candidates = []
     sample_boards = model.sample_boards
     model.sample_boards = lambda count, turn: candidates.extend(sample_boards(count, turn)) or candidates
@@ -104,7 +104,7 @@ def test_moves_must_fit_what_we_saw_of_them():
     board = chess.Board()
     board.push_uci("e2e4")
     seen = FogMove(to_square=chess.F6, piece=chess.Piece(chess.KNIGHT, chess.BLACK))
-    assert [move for move in board.generate_pseudo_legal_moves() if fits(board, move, seen)] == [
+    assert [move for move in board.generate_pseudo_legal_moves() if is_fog_move_aligned(board, move, seen)] == [
         chess.Move.from_uci("g8f6")
     ]
 
@@ -113,17 +113,20 @@ def test_move_probabilities_follow_the_opponent_scores():
     board = chess.Board()
     board.push_uci("e2e4")
     best, middle, worst = (chess.Move.from_uci(uci) for uci in ("e7e5", "h7h6", "a7a6"))
-    model = new_model(sizes=(1,), top_k=3)
-    model.evaluator.top_moves = lambda board, count, moves=None: {best: 50, middle: 0, worst: -100}
+    model = new_model(sizes=(1,), num_of_top_moves=3)
+    # White's scores, so Black's best is the lowest
+    model.evaluator.score = lambda board: {best: -50, middle: 0, worst: 100}[board.peek()]
     probabilities = model.move_probabilities(Simulation(board, 1.0, None), [best, middle, worst])
     assert abs(sum(probabilities.values()) - 1) < 1e-9
     assert probabilities[best] > probabilities[middle] > probabilities[worst] > 0
 
 
 def test_strength_doubles_the_likelihood_every_10000_over_strength_centipawns():
-    assert convert_score_to_probability([50, 0, -100], 0) == [1 / 3] * 3
-    better, worse = convert_score_to_probability([100, 0], 100)
+    assert convert_score_to_probability([50, 0, -100], chess.WHITE, 0) == [1 / 3] * 3
+    better, worse = convert_score_to_probability([100, 0], chess.WHITE, 100)
     assert abs(better / worse - 2) < 1e-9
-    better, worse = convert_score_to_probability([100, 0], 200)
+    better, worse = convert_score_to_probability([100, 0], chess.WHITE, 200)
     assert abs(better / worse - 4) < 1e-9
-    assert convert_score_to_probability([], 100) == []
+    worse, better = convert_score_to_probability([100, 0], chess.BLACK, 100)
+    assert abs(better / worse - 2) < 1e-9
+    assert convert_score_to_probability([], chess.WHITE, 100) == []

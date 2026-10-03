@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import logging
 import math
 import random
 from dataclasses import dataclass
@@ -9,12 +8,10 @@ from typing import Dict, List, Sequence
 
 import chess
 
-from evaluator import Evaluator
-from fow_chess import FoWRulesBoard
+from evaluator import Evaluator, search
+from fow_rules import FoWRulesBoard
 from fow_view import FogMove, FogView
 from piece_tracking import PieceTracking, PieceTrackingModel
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -36,8 +33,8 @@ class BeliefStateModel:
     - ``tracking``: the possible squares of each opponent piece, deduced logically from the views.
     - ``simulations``: at most ``sizes[0]`` full boards simulated move by move, most likely first, each with the
       opponent's own belief state on that board (sized by ``sizes[1:]``, None once they run out). The opponent moves
-      by his belief: on each board, his ``top_k`` moves on the board as he believes it, weighted by how likely a
-      player of ``opponent_strength`` is to play each (see ``convert_score_to_probability``).
+      by his belief: on each board, his ``num_of_top_moves`` moves from a ``search`` of his belief state, weighted
+      by how likely a player of ``opponent_strength`` is to play each (see ``convert_score_to_probability``).
 
     The tracking validates the simulations: boards it does not allow are dropped with their opponent belief, and the
     dropped ones are refilled with placements sampled from it.
@@ -48,8 +45,8 @@ class BeliefStateModel:
         color: chess.Color,
         initial_view: FogView,
         evaluator: Evaluator,
-        sizes: Sequence[int] = (10, 3),
-        top_k: int = 3,
+        sizes: Sequence[int] = (20, 3),
+        num_of_top_moves: int = 10,
         opponent_strength: float = 50.0,
         seed: int | None = None,
         board: chess.Board | None = None,
@@ -59,7 +56,7 @@ class BeliefStateModel:
         self.opponent = not color
         self.evaluator = evaluator
         self.sizes = tuple(sizes)
-        self.top_k = top_k
+        self.num_of_top_moves = num_of_top_moves
         self.opponent_strength = opponent_strength
         self.random = random.Random(seed)
         self.tracking = PieceTrackingModel(color, initial_view)
@@ -83,7 +80,7 @@ class BeliefStateModel:
             initial_view=board.generate_view(self.opponent),
             evaluator=self.evaluator,
             sizes=self.sizes[1:],
-            top_k=self.top_k,
+            num_of_top_moves=self.num_of_top_moves,
             opponent_strength=self.opponent_strength,
             seed=self.random.randrange(2**32),
             board=board,
@@ -116,70 +113,57 @@ class BeliefStateModel:
         """
         self.tracking.update_own_move(move, view)
         self.filter_valid_simulations()
+
+        # update opponent belief state model as we make a move
         simulations = []
         for simulation in self.simulations:
-            board = after(simulation.board, move, self.color)
+            board = apply_move_to_board(simulation.board, move, self.color)
             if simulation.opponent_bsm:
                 simulation.opponent_bsm.update_opponent_move(board.generate_view(self.opponent))
             simulations.append(Simulation(board, simulation.likelihood, simulation.opponent_bsm))
         self.simulations = simulations
+
         self.refill_simulations(turn=self.opponent)
 
-    def update_opponent_move(self, view: FogView) -> FogMove:
+    def update_opponent_move(self, view: FogView) -> None:
         """
-        The opponent moved; ``view`` is our view after it. On every simulated board, his ``top_k`` moves that fit what
-        we deduced of his move and the tracking allows branch the board, weighted by his belief; the ``sizes[0]`` most
-        likely are kept, and the opponent's belief on each sees his own move. Returns his move as far as deduced.
+        The opponent moved; ``view`` is our view after it. Every simulated board branches into one board per move of
+        his ``num_of_top_moves`` that fit what we deduced of his move, with the board's likelihood times the move's
+        probability (summing to 1 per board) and a copy of the board's opponent belief seeing his own move. The
+        branches the updated tracking allows are kept, the ``sizes[0]`` most likely of them, and the simulations are
+        refilled.
         """
         fog_move = self.tracking.update_opponent_move(view)
-        children = {}
+
+        # explode every simulation by the opponent's moves aligned with what we saw
+        simulations = []
         for simulation in self.simulations:
             board = simulation.board
-            moves = [move for move in board.generate_pseudo_legal_moves()
-                     if fits(board, move, fog_move) and self.tracking.allows(after(board, move))]
+            moves = [move for move in board.generate_pseudo_legal_moves() if is_fog_move_aligned(board, move, fog_move)]
             for move, probability in self.move_probabilities(simulation, moves).items():
-                likelihood = simulation.likelihood * probability
-                key = after(board, move).board_fen()
-                if key not in children or children[key][2] < likelihood:
-                    children[key] = (simulation, move, likelihood)
-        best = sorted(children.values(), key=lambda child: -child[2])[:self.sizes[0]]
-
-        # every child needs its own opponent belief: a parent's first child takes it, the others copies made before
-        # any of them is updated
-        parents = set()
-        opponent_bsms = []
-        for simulation, _, _ in best:
-            opponent_bsm = simulation.opponent_bsm
-            if opponent_bsm and id(simulation) in parents:
-                opponent_bsm = opponent_bsm.branch()
-            parents.add(id(simulation))
-            opponent_bsms.append(opponent_bsm)
-
-        simulations = []
-        for (simulation, move, likelihood), opponent_bsm in zip(best, opponent_bsms):
-            board = after(simulation.board, move)
-            try:
+                child = apply_move_to_board(board, move, self.opponent)
+                opponent_bsm = simulation.opponent_bsm.branch() if simulation.opponent_bsm else None
                 if opponent_bsm:
-                    opponent_bsm.update_own_move(move, board.generate_view(self.opponent))
-            except Exception as error:
-                logger.info(f"Dropping a simulation the opponent's belief cannot follow: {error}")
-                continue
-            simulations.append(Simulation(board, likelihood, opponent_bsm))
+                    opponent_bsm.update_own_move(move, child.generate_view(self.opponent))
+                simulations.append(Simulation(child, simulation.likelihood * probability, opponent_bsm))
         self.simulations = simulations
+
+        self.filter_valid_simulations()
+        self.simulations = sorted(self.simulations, key=lambda simulation: -simulation.likelihood)[:self.sizes[0]]
+
         self.refill_simulations(turn=self.color)
-        return fog_move
 
     def move_probabilities(self, simulation: Simulation, moves: List[chess.Move]) -> Dict[chess.Move, float]:
         """
-        The opponent's ``top_k`` of ``moves`` on the simulated board and their probabilities, from his scores on the
-        board as he believes it (his most likely board, or the simulated one without his belief).
+        The opponent's ``num_of_top_moves`` of ``moves`` on the simulated board and their probabilities, from their
+        values in his search of his belief state (the scores on the simulated board without one).
         """
-        believed = simulation.board
-        if simulation.opponent_bsm and simulation.opponent_bsm.simulations:
-            believed = simulation.opponent_bsm.simulations[0].board.copy(stack=False)
-            believed.turn = self.opponent
-        top = self.evaluator.top_moves(believed, self.top_k, moves)
-        return dict(zip(top, convert_score_to_probability(list(top.values()), self.opponent_strength)))
+        if simulation.opponent_bsm is None:
+            top_moves_and_probs = self.evaluator.top_moves(simulation.board, self.num_of_top_moves, moves)
+        else:
+            top_moves_and_probs = search(simulation.opponent_bsm, self.evaluator, moves, self.num_of_top_moves).move_values
+        probabilities = convert_score_to_probability(list(top_moves_and_probs.values()), self.opponent, self.opponent_strength)
+        return dict(zip(top_moves_and_probs, probabilities))
 
     def filter_valid_simulations(self) -> None:
         """Keep the simulations the tracking allows (it is updated with our view)."""
@@ -195,8 +179,8 @@ class BeliefStateModel:
         if missing <= 0:
             return
         boards = self.sample_boards(2 * missing, turn)
-        likelihoods = convert_score_to_probability([self.evaluator.score(board, self.opponent) for board in boards],
-                                             self.opponent_strength)
+        likelihoods = convert_score_to_probability([self.evaluator.score(board) for board in boards], self.opponent,
+                                                   self.opponent_strength)
         best = sorted(zip(boards, likelihoods), key=lambda pair: -pair[1])[:missing]
         refill = [Simulation(board, likelihood, self.donor_bsm(board)) for board, likelihood in best]
         self.simulations = sorted(self.simulations + refill, key=lambda simulation: -simulation.likelihood)
@@ -233,17 +217,21 @@ class BeliefStateModel:
     def donor_bsm(self, board: chess.Board) -> BeliefStateModel | None:
         """
         The opponent belief for a new ``board``: a copy of the one on the simulation whose board the opponent sees
-        most like ``board`` (a new one if no simulation remains).
+        most like ``board`` (a new one if no simulation remains), with his current view set to his view of ``board``.
         """
         if not self.simulations:
             return self.opponent_model(board)
         view = board.generate_view(self.opponent)
         donor = min(self.simulations,
                     key=lambda simulation: view_distance(view, simulation.board.generate_view(self.opponent)))
-        return donor.opponent_bsm.branch() if donor.opponent_bsm else None
+        if donor.opponent_bsm is None:
+            return None
+        bsm = donor.opponent_bsm.branch()
+        bsm.tracking.current_view = view
+        return bsm
 
 
-def after(board: chess.Board, move: chess.Move, mover: chess.Color | None = None) -> chess.Board:
+def apply_move_to_board(board: chess.Board, move: chess.Move, mover: chess.Color | None = None) -> chess.Board:
     """``board`` after ``move``, played by ``mover`` (the side to move by default)."""
     result = board.copy(stack=False)
     if mover is not None:
@@ -252,7 +240,7 @@ def after(board: chess.Board, move: chess.Move, mover: chess.Color | None = None
     return result
 
 
-def fits(board: chess.Board, move: chess.Move, fog_move: FogMove) -> bool:
+def is_fog_move_aligned(board: chess.Board, move: chess.Move, fog_move: FogMove) -> bool:
     """Whether ``move`` on ``board`` agrees with what we saw of it: its squares and piece, where seen."""
     if fog_move.from_square is not None and move.from_square != fog_move.from_square:
         return False
@@ -261,15 +249,18 @@ def fits(board: chess.Board, move: chess.Move, fog_move: FogMove) -> bool:
     return fog_move.piece is None or board.piece_type_at(move.from_square) == fog_move.piece.piece_type
 
 
-def convert_score_to_probability(scores: List[int], strength: float) -> List[float]:
+def convert_score_to_probability(scores: List[float], color: chess.Color, strength: float) -> List[float]:
     """
-    How likely a player of ``strength`` (non-negative) is to pick each option of ``scores`` (his centipawns): a softmax
+    How likely the ``color`` player of ``strength`` (non-negative) is to pick each option of ``scores`` (White's
+    centipawns, so Black prefers the lower): a softmax
     at temperature 10000 / (strength * ln 2) centipawns, so every ``10000 / strength`` centipawns more doubles the
     likelihood: 0 strength makes all options equally likely and 100 strength makes an option 100 centipawns better
     twice as likely.
     """
     if not scores:
         return []
+    if color == chess.BLACK:
+        scores = [-score for score in scores]
     best = max(scores)
     weights = [math.exp(strength * math.log(2) * (score - best) / 10000) for score in scores]
     total = sum(weights)
@@ -300,7 +291,7 @@ if __name__ == "__main__":
             model.update_opponent_move(view)
         print(f"{uci}: {time.perf_counter() - start:.2f}s, {len(model.simulations)} simulations")
 
-    print(board.display(chess.WHITE))
+    print(board.generate_view(chess.WHITE))
     for simulation in model.simulations[:3]:
         real = " (real)" if simulation.board.board_fen() == board.board_fen() else ""
         print(f"\n{simulation.likelihood:.3f}{real}")

@@ -784,5 +784,5 @@ if __name__ == "__main__":
             model.update_own_move(move, view)
         else:
             print(uci, model.update_opponent_move(view))
-    print(board.display(chess.WHITE))
+    print(board.generate_view(chess.WHITE))
     print(model.display())

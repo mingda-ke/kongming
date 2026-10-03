@@ -1,6 +1,9 @@
 # kongming
 Fog of War chess engine. Kong Ming (aka Zhuge Liang) is the greatest military strategist in ancient China, Three Kingdoms period. FoW chess is like a real war that you can only see where you can move or attach. The goal is to directly capture opponent's king, so no checkmate or walk into checkmate.
 
+### Play locally
+Run `python fow_gui.py` to open a Tkinter pass-and-play game. The board reveals only the current player's FoW view; select a piece and then a highlighted destination. Capture the opposing king to win.
+
 ### Guideline
 The algorithm resembles how human thinks when playing Fog of War chess, but it has greater searching breadth, depth and mostly importantly higher accuracy than human (even the best human blunders), and therefore aims to achieve a higher Elo than best human.
 

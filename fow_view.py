@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from chess import BB_FILE_H, BB_SQUARES, H1, SQUARES_180, Piece
 from typing import List, Set
 
+from fow_canvas import show_view
 from static import (
     BLOCKED_PIECE,
     BLOCKED_SQUARE_UNICODE,
@@ -35,7 +36,11 @@ class FogView:
         self.color = color
         self.values: List[int | Piece] = values
 
-    def display(self) -> str:
+    def display(self, title: str | None = None) -> None:
+        """Show the view in a window (titled by its side by default), returning when it is closed."""
+        show_view(self, title or f"{chess.COLOR_NAMES[self.color].capitalize()}'s view")
+
+    def __str__(self) -> str:
         builder: List[str] = []
         for square in SQUARES_180:
             value = self.values[square]
