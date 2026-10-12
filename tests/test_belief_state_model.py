@@ -7,7 +7,7 @@ from fow_chess import FoWChessBoard
 from piece_tracking import SpecificPiece
 
 
-def test_e4_e6_Bc4():
+def test_e4_e6_Bc4_Nf6():
     # Test the e4 move and its effect on the belief state model
     board = FoWChessBoard()
     model = BeliefStateModel(color=chess.WHITE, sizes=(10, 3))
@@ -59,8 +59,16 @@ def test_e4_e6_Bc4():
         for simulation in model.simulations
     ), "A black pawn on g5 is bad move and should not appear in any simulation"
 
+    c4_blockers = {chess.Piece(piece_type=chess.BISHOP, color=chess.WHITE), chess.Piece(piece_type=chess.PAWN, color=chess.WHITE)}
+    assert all(
+        white_simulation.view.values[chess.C4] in c4_blockers
+        for simulation in model.simulations
+        if simulation.view.values[chess.C5] == chess.Piece(piece_type=chess.PAWN, color=chess.BLACK)
+        for white_simulation in simulation.simulations
+    ), "A black simulation with a pawn on c5 sees c4 blocked, so its white simulations should have a bishop or pawn on c4"
+
 
 
 if __name__ == "__main__":
-    test_e4_e6_Bc4()
+    test_e4_e6_Bc4_Nf6()
     print("All tests passed.")

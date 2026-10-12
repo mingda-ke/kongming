@@ -820,7 +820,7 @@ class PieceTrackingModel:
     ) -> None:
         """Exactly one of ``candidates`` is on ``square``, which is recorded as a constraint."""
         tracking = self.piece_tracking
-        # deduct total invisible moves by observed minimum moves
+        # deduce total invisible moves by observed minimum moves
         tracking.consume_moves(candidates, {square})
 
         # the earliest age at which each candidate could have reached the square

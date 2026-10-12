@@ -82,7 +82,7 @@ class BeliefStateModel:
         #       - as conservative side, assuming all opponent pieces stay at initial stage until we know deterministic placement of opponent pieces.
         # - simulations is a list of opponent piece placements with their own opponent belief state (BeliefStateModel contains both info)
         self.opponent_knowledge = None if self.is_leaf else PieceTrackingModel(color=self.opponent)
-        self.simulations: List[BeliefStateModel] = self.generate_simulations(tries=self.sizes[0])
+        self.simulations: List[BeliefStateModel] = self.generate_simulations(num_sims=self.sizes[0])
 
     def __repr__(self) -> str:
         return (f"<BSM {self.name} likelihood={self.likelihood:.4f} depth={self.depth} "
@@ -197,7 +197,7 @@ class BeliefStateModel:
         filtered_simulations = []
         for simulation in self.simulations:
             board_after_move = simulation.create_board(other=own_piece_placement, turn=self.color)
-            if self.tracking.allows(board=board_after_move):
+            if board_after_move.generate_view(color=self.color) == view:
                 opponent_view_after_move = board_after_move.generate_view(color=self.opponent)
                 simulation.update_opponent_move(view=opponent_view_after_move)
                 filtered_simulations.append(simulation)
@@ -206,7 +206,7 @@ class BeliefStateModel:
         generated_simulations = []
         if dropped: # only regenerate simulations when some were dropped.
             self.log("filtered %d simulations: no longer allowed by the tracking", dropped)
-            generated_simulations = self.generate_simulations(tries=self.sizes[0] - len(filtered_simulations) if dropped else 0)
+            generated_simulations = self.generate_simulations(num_sims=self.sizes[0] - len(filtered_simulations) if dropped else 0)
         self.simulations = self.combine_simulations(simulation_set1=filtered_simulations, simulation_set2=generated_simulations)
 
         # update opponent determined belief state (opponent_knowledge) no matter which simulation is the real.  
@@ -248,7 +248,7 @@ class BeliefStateModel:
         # refill simluations when there's deficit
         dropped_simulations = set(self.simulations) - {simulation for simulation, _ in valid_simulation_move_combinations}
         if len(dropped_simulations) > 0 and len(valid_simulation_move_combinations) < self.sizes[0]:
-            generated_simulations = self.generate_simulations(tries=len(dropped_simulations)*2, turn=self.opponent)
+            generated_simulations = self.generate_simulations(num_sims=len(dropped_simulations))
             combined_simulations = self.combine_simulations(simulation_set1=simulations, simulation_set2=generated_simulations)
             valid_simulation_move_combinations += [(simulation, valid_move) for simulation in set(combined_simulations).difference(simulations) for valid_move in get_view_aligned_moves(simulation=simulation, view=our_view)]
             simulations = combined_simulations
@@ -261,6 +261,8 @@ class BeliefStateModel:
             probabilities_by_move = self.move_probabilities(simulation=simulation, moves=valid_moves)
             board_of_simulation = simulation.create_board(other=our_piece_placement, turn=simulation.color)
             for move, move_probability in probabilities_by_move.items():
+                if move == chess.Move.from_uci("c7c5"):
+                    pass
                 simulation_after_move = simulation.branch()
                 view_after_move = apply_move_to_board(board_of_simulation, move).generate_view(color=self.opponent)
                 simulation_after_move.update_own_move(move=move, view=view_after_move)
@@ -279,6 +281,7 @@ class BeliefStateModel:
         A new simulation on a placement of the opponent's pieces sampled from the tracking with a generator seeded by
         ``seed`` (see ``simulation_on``). None when the sampling hits a dead end.
         """
+        # TODO: there is a known gap using piece tracking to simulate placement - piece dependency, e.g. Bc4 requires e pawn to not be on e2.
         opponent_placement = self.tracking.simulate_placement(rng=random.Random(seed))
         if opponent_placement is None:
             return None
@@ -305,27 +308,28 @@ class BeliefStateModel:
                     likelihood=1.0,
                 )
 
-    def generate_simulations(self, tries: int) -> List[BeliefStateModel]:
+    def generate_simulations(self, num_sims: int) -> List[BeliefStateModel]:
         """
-        New simulations (with ``turn`` to move, see ``simulation_on``) on up to ``tries`` placements sampled from the
+        New simulations (with ``turn`` to move, see ``simulation_on``) on up to ``num_sims`` placements sampled from the
         tracking, each by a fresh seed. Placements already simulated or sampled are skipped before their opponent
         belief is built, and a fully determined tracking (e.g. at the start) is sampled only once, having a single
         placement.
         """
-        if tries == 0:
+        if num_sims == 0:
             return []
 
         # starting position
         if all(len(self.piece_tracking.possible_squares(piece)) == 1 for piece in self.piece_tracking.evolutions):
-            tries = 1
+            num_sims = 1
         
-        self.log("generating up to %d simulations", tries)
-        simulations = [self.generate_simulation(seed=self.random.randrange(2**i), number=i) for i in range(tries)]
+        self.log("generating up to %d simulations", num_sims)
+        simulations = [sim for i in range(num_sims*2)
+                       if (sim := self.generate_simulation(seed=self.random.randrange(2**i), number=i)) is not None]
         probabilities = self.simulation_probabilities(simulations=[sim for sim in simulations if sim is not None])
+        
         for simulation in simulations:
-            if simulation is not None:
-                simulation.likelihood = probabilities[simulation]
-        return simulations
+            simulation.likelihood = probabilities[simulation]
+        return sorted(simulations, key=lambda sim: sim.likelihood, reverse=True)[:num_sims]
 
     def combine_simulations(self, simulation_set1: List[BeliefStateModel],
                             simulation_set2: List[BeliefStateModel]) -> List[BeliefStateModel]:
