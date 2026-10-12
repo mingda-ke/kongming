@@ -8,7 +8,7 @@ from typing import Dict, Iterable, List, Set
 
 import chess
 
-from fow_view import FogMove, FogView, deduce_opponent_move
+from fow_view import FogMove, FogView, PiecePlacement, deduce_opponent_move
 from static import BLOCKED_PIECE, EMPTY_SQUARE, INVISIBLE_PIECE
 
 logger = logging.getLogger(__name__)
@@ -303,10 +303,21 @@ class PieceTracking:
                 squares.discard(square)
 
     def remove_squares(self, removed: Set[chess.Square]) -> None:
-        """No tracked piece can stand on ``removed``, so drop them from every piece's evolution."""
-        for evolution in self.evolutions.values():
-            for squares in evolution.values():
+        """
+        No tracked piece can stand on ``removed``, so drop them from every piece's evolution, along with the ages left
+        without squares. A piece whose youngest ages are gone is known to have made that many moves: its evolution
+        shifts back to start at age 0 (with its constraint ages), and the moves are deducted from the invisible move
+        count.
+        """
+        for piece, evolution in self.evolutions.items():
+            for age, squares in list(evolution.items()):
                 squares -= removed
+                if not squares:
+                    del evolution[age]
+            shift = min(evolution, default=0)
+            if shift > 0:
+                self.evolutions[piece] = {age - shift: squares for age, squares in evolution.items()}
+                self.invisible_move_count -= shift
 
     def add_constraint(
         self,
@@ -382,6 +393,43 @@ class PieceTracking:
         return "\n".join(lines)
 
 
+def identify_pieces(placement: PiecePlacement) -> Dict[SpecificPiece, chess.Square]:
+    """
+    The specific piece of each piece of ``placement``: a pawn by the nearest free file, a bishop by its square color
+    (then file), and any other by the nearest free starting file. Pieces beyond the starting set (promoted) are left
+    out.
+    """
+    starts = {
+        piece: next(iter(evolution[0]))
+        for piece, evolution in PieceTracking.initial(color=placement.color).evolutions.items()
+    }
+    identities: Dict[SpecificPiece, chess.Square] = {}
+    for square, piece_type in sorted(placement.pieces.items()):
+        free = [piece for piece in starts if piece.piece_type == piece_type and piece not in identities]
+        if not free:
+            logger.info(f"No starting {chess.piece_name(piece_type)} left for {chess.square_name(square)}.")
+            continue
+        identities[min(free, key=lambda piece: (
+            is_dark(starts[piece]) != is_dark(square) if piece_type == chess.BISHOP else False,
+            abs(chess.square_file(starts[piece]) - chess.square_file(square)),
+        ))] = square
+    return identities
+
+
+def is_dark(square: chess.Square) -> bool:
+    return bool(chess.BB_DARK_SQUARES & chess.BB_SQUARES[square])
+
+
+def can_stand_on(piece: SpecificPiece, square: chess.Square) -> bool:
+    """Whether ``piece`` may stand on ``square``: a pawn never on a back rank, a bishop only on its square color."""
+    if piece.piece_type == chess.PAWN:
+        return chess.square_rank(square) not in (0, 7)
+    if piece.piece_type == chess.BISHOP:
+        start = chess.square(piece.file, 0 if piece.color == chess.WHITE else 7)
+        return is_dark(start) == is_dark(square)
+    return True
+
+
 class PieceTrackingModel:
     """
     Track the possible squares of each opponent piece from ``color``'s side, by logical deduction from the views.
@@ -389,13 +437,15 @@ class PieceTrackingModel:
     piece_tracking holds the possible squares of each opponent piece and the constraints between them.
     """
 
-    def __init__(self, color: chess.Color, initial_view: FogView | None = None):
+    def __init__(self, color: chess.Color, view: FogView | None=None, piece_tracking: PieceTracking | None = None):
+        """
+        Initialize a model that supports a middle game view and piece_tracking, which may not align with view so need to apply_evidences below. 
+        """
         self.color = color
         self.opponent = not color
-        self.current_view = initial_view or FogView(self.color, [INVISIBLE_PIECE] * 64)
-        # the view before the latest move, e.g. to know which squares blocked the mover
-        self.piece_tracking = PieceTracking.initial(self.opponent)
-        # evidences queued for the current apply_evidences pass; derived evidences are appended during the pass
+        self.current_view = view or FogView.initial(color=self.color)
+        self.piece_tracking = piece_tracking or PieceTracking.initial(self.opponent)
+        self.apply_evidences([observe_square(square, piece) for square, piece in enumerate(self.current_view.values) if isinstance(piece, chess.Piece) and piece.color == self.opponent])
         self.evidences: List[Evidence] = []
 
     def hypothetical_copy(self) -> PieceTrackingModel:
@@ -404,6 +454,12 @@ class PieceTrackingModel:
         model.piece_tracking = copy.deepcopy(self.piece_tracking)
         model.evidences = []
         return model
+
+    def determined_opponent_placement(self) -> PiecePlacement:
+        """The opponent's pieces whose square the tracking has determined."""
+        return PiecePlacement(color=self.opponent, pieces={
+            square: piece.piece_type for piece, square in self.piece_tracking.determined_squares().items()
+        })
 
     def allows(self, board: chess.Board) -> bool:
         """
@@ -418,6 +474,10 @@ class PieceTrackingModel:
                 return False
         return True
 
+    def update_view(self, view: FogView) -> None:
+        """Set the current view to ``view`` without observing anything from it."""
+        self.current_view = view
+
     def update_own_move(self, move: chess.Move, view: FogView) -> None:
         """
         Our move is fully known; view is the new FogView after we make our move.
@@ -425,9 +485,8 @@ class PieceTrackingModel:
         capture_move = self._deduce_capture(self.current_view, move)
         self.apply_evidences([
             capture_move,
-            *(observe_square(square, value) for square, value in enumerate(view.values)),
+            *[observe_square(square, value) for square, value in enumerate(view.values) if (isinstance(value, chess.Piece) and value.color == self.opponent) or value== BLOCKED_PIECE],
         ])
-        self.current_view = view
 
     def update_opponent_move(self, view: FogView) -> FogMove:
         """
@@ -437,13 +496,24 @@ class PieceTrackingModel:
         Returns the deduced FoW move so existing callers keep the same interface.
         """
         fog_move = deduce_opponent_move(self.current_view, view)
+        # both steps see the view before the move as current, e.g. to know which squares the mover could go unseen
+        self.observe_discovered_squares(view=view, fog_move=fog_move)
+        self.apply_fog_move(fog_move=fog_move)
+        return fog_move
+
+    def observe_discovered_squares(self, view: FogView, fog_move: FogMove) -> None:
+        """
+        First step of an opponent move: observe every visible square of ``view`` (the view after it) except those the
+        ``fog_move`` accounts for, e.g. pieces discovered by it.
+        """
         move_squares = {fog_move.from_square, fog_move.to_square}
         self.apply_evidences([
-            fog_move,
-            *(observe_square(square, value) for square, value in enumerate(view.values) if square not in move_squares),
+            observe_square(square, value) for square, value in enumerate(view.values) if square not in move_squares
         ])
-        self.current_view = view
-        return fog_move
+
+    def apply_fog_move(self, fog_move: FogMove) -> None:
+        """Second step of an opponent move: apply the ``fog_move`` deduced from the view change."""
+        self.apply_evidences([fog_move])
 
     # ------------------------------------------------------------------ public API
 
@@ -584,11 +654,23 @@ class PieceTrackingModel:
             self.evidences.append(EmptySquare(fog_move.from_square))
 
 
-    def simulate(self, rng: random.Random) -> Dict[SpecificPiece, chess.Square] | None:
+    def simulate_placement(self, rng: random.Random, tries: int = 100) -> PiecePlacement | None:
         """
-        One random placement of the tracked pieces, without any evaluation, on a single hypothetical copy: pieces from
-        the most determined to the least, each on a uniformly random square still possible for it. Placing a piece
-        consumes the moves it needed and narrows the others. None on a dead end, where a piece has no square left.
+        One random placement of the tracked (opponent) pieces, without any evaluation: placements are attempted until
+        one succeeds, up to ``tries`` attempts. None if every attempt hits a dead end.
+        """
+        for _ in range(tries):
+            placement = self._attempt_simulate_placement(rng=rng)
+            if placement is not None:
+                return PiecePlacement(color=self.opponent,
+                                      pieces={square: piece.piece_type for piece, square in placement.items()})
+        return None
+
+    def _attempt_simulate_placement(self, rng: random.Random) -> Dict[SpecificPiece, chess.Square] | None:
+        """
+        One placement attempt on a single hypothetical copy: pieces from the most determined to the least, each on a
+        uniformly random square still possible for it. Placing a piece consumes the moves it needed and narrows the
+        others. None on a dead end, where a piece has no square left.
         """
         model = self.hypothetical_copy()
         tracking = model.piece_tracking
@@ -711,7 +793,7 @@ class PieceTrackingModel:
             arrival = min(age for age, squares in evolution.items() if square in squares)
             if not 0 < arrival == tracking.invisible_move_count:
                 return
-            origins = evolution[arrival - 1]
+            origins = evolution.get(arrival - 1, set())
         if len(origins) != 1:
             return
         self.evidences.extend(

@@ -1,7 +1,9 @@
+import random
+
 import chess
 from dataclasses import dataclass
 from chess import BB_FILE_H, BB_SQUARES, H1, SQUARES_180, Piece
-from typing import List, Set
+from typing import Dict, List, Set
 
 from fow_canvas import show_view
 from static import (
@@ -28,6 +30,38 @@ class FogMove:
         return self.from_square is None and self.to_square is None and self.piece is None
 
 
+@dataclass(frozen=True)
+class PiecePlacement:
+    """Where one side's pieces are: their squares and types."""
+
+    color: chess.Color
+    pieces: Dict[chess.Square, chess.PieceType]
+
+    def place_on(self, board: chess.Board) -> None:
+        """Set the pieces on ``board``."""
+        for square, piece_type in self.pieces.items():
+            board.set_piece_at(square=square, piece=Piece(piece_type=piece_type, color=self.color))
+
+    def override_with(self, other: "PiecePlacement") -> "PiecePlacement":
+        """
+        This placement with ``other``'s pieces put on their squares. Each piece of ``other`` takes the place of a piece
+        of its type here: the one already on its square if any, else a random one, preferring one ``other`` displaces.
+        Pieces left on a square of ``other`` are dropped.
+        """
+        if other.color != self.color:
+            raise ValueError("Cannot override a placement with the other side's pieces")
+        remaining = {square: piece_type for square, piece_type in self.pieces.items() if other.pieces.get(square) != piece_type}
+        for square, piece_type in other.pieces.items():
+            if self.pieces.get(square) == piece_type:
+                continue
+            candidates = [candidate for candidate, candidate_type in remaining.items() if candidate_type == piece_type]
+            displaced = [candidate for candidate in candidates if candidate in other.pieces]
+            if candidates:
+                del remaining[random.choice(seq=displaced or candidates)]
+        kept = {square: piece_type for square, piece_type in remaining.items() if square not in other.pieces}
+        return PiecePlacement(color=self.color, pieces={**kept, **other.pieces})
+
+
 class FogView:
     """A per-side FoW view represent INVISIBLE_PIECE, EMPTY_SQUARE, BLOCKED_PIECE or visible Piece for each square."""
 
@@ -35,6 +69,34 @@ class FogView:
         """color as White means from white's perspective."""
         self.color = color
         self.values: List[int | Piece] = values
+
+    @classmethod
+    def initial(cls, color: chess.Color) -> "FogView":
+        """
+        ``color``'s view of the standard starting position: his own pieces, and the two empty ranks in front of them
+        that his pawns (and knights) see. The rest is invisible.
+        """
+        values: List[int | Piece] = [INVISIBLE_PIECE] * 64
+        for square, piece in chess.Board().piece_map().items():
+            if piece.color == color:
+                values[square] = piece
+        for rank in ((2, 3) if color == chess.WHITE else (5, 4)):
+            for file in range(8):
+                values[chess.square(file, rank)] = EMPTY_SQUARE
+        return cls(color=color, values=values)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, FogView) and self.color == other.color and self.values == other.values
+
+    def __hash__(self) -> int:
+        return hash((self.color, tuple(self.values)))
+
+    def generate_piece_placement(self) -> PiecePlacement:
+        """The placement of the view's own side, whose pieces are always visible to it."""
+        return PiecePlacement(color=self.color, pieces={
+            square: value.piece_type for square, value in enumerate(self.values)
+            if isinstance(value, Piece) and value.color == self.color
+        })
 
     def display(self, title: str | None = None) -> None:
         """Show the view in a window (titled by its side by default), returning when it is closed."""
@@ -61,6 +123,22 @@ class FogView:
                 builder.append(" ")
 
         return "".join(builder)
+
+
+def is_piece_move(piece: Piece, from_square: chess.Square, to_square: chess.Square) -> bool:
+    """
+    Whether ``piece`` can move from ``from_square`` to ``to_square`` without capturing, on an otherwise empty board: a
+    pawn only pushes forward (two squares from its starting rank), since its diagonal moves are captures. A king may
+    also castle from its starting square.
+    """
+    if piece.piece_type == chess.KING and from_square == (chess.E1 if piece.color == chess.WHITE else chess.E8):
+        if to_square in {from_square - 2, from_square + 2}:
+            return True
+    board = chess.Board(None)
+    board.set_piece_at(from_square, piece)
+    board.turn = piece.color
+    # compare squares only, so a promoting push counts too
+    return any(move.to_square == to_square for move in board.generate_pseudo_legal_moves(from_mask=BB_SQUARES[from_square]))
 
 
 def deduce_opponent_move(before: FogView, after: FogView) -> FogMove:
@@ -109,34 +187,43 @@ def deduce_opponent_move(before: FogView, after: FogView) -> FogMove:
     blocked_from = [square for square in changed if before.values[square] == BLOCKED_PIECE]
     blocked_to = [square for square in changed if after.values[square] == BLOCKED_PIECE]
 
-    # same piece observed to move from one square to another
-    known_moved_piece = list(set(known_from.values()).intersection(set(known_to.values())))
-    if len(known_moved_piece) == 1:
-        known_moved_piece = known_moved_piece[0]
-        from_square = [square for square, piece in known_from.items() if piece == known_moved_piece][0]
-        to_square = [square for square, piece in known_to.items() if piece == known_moved_piece][0]
+    # same piece observed to move from one square to another, by a move its type can make
+    known_moves = [
+        (from_square, to_square, piece)
+        for from_square, piece in known_from.items()
+        for to_square, other in known_to.items()
+        if piece == other and is_piece_move(piece, from_square, to_square)
+    ]
+    if len(known_moves) == 1:
+        from_square, to_square, piece = known_moves[0]
         return FogMove(
             from_square=from_square,
             to_square=to_square,
-            piece=known_moved_piece,
+            piece=piece,
         )
 
     # only see one square becomes invisible while no other visible changes, then it must be a piece moved out of visibility.
     if known_from and not known_to:
         from_square = list(known_from.keys())[0]
+        piece = before.values[from_square]
+        # a newly blocked square is its destination only if the piece can move there
+        to_squares = [square for square in blocked_to if is_piece_move(piece, from_square, square)]
         return FogMove(
             from_square=from_square,
-            to_square=blocked_to[0] if blocked_to else None,
-            piece=before.values[from_square],
+            to_square=to_squares[0] if to_squares else None,
+            piece=piece,
         )
 
     # only see one square becomes visible while no other visible changes, then it must be a piece moved into visibility.
     if not known_from and known_to:
         to_square = list(known_to.keys())[0]
+        piece = after.values[to_square]
+        # a newly unblocked square is its origin only if the piece can move from there
+        from_squares = [square for square in blocked_from if is_piece_move(piece, square, to_square)]
         return FogMove(
-            from_square=blocked_from[0] if blocked_from else None,
+            from_square=from_squares[0] if from_squares else None,
             to_square=to_square,
-            piece=after.values[to_square],
+            piece=piece,
         )
 
     # only see blocked squares change, then no piece type information (can be further derived in possibility model).
@@ -161,12 +248,15 @@ def deduce_opponent_move(before: FogView, after: FogView) -> FogMove:
     for square, piece in enumerate(before.values):
         if isinstance(piece, chess.Piece) and piece.color == before.color:
             temp.set_piece_at(square, piece)
+    # the squares we attack
+    temp.turn = before.color
 
     attacked_squares = set([move.to_square for move in temp.generate_pseudo_legal_moves()])
-    known_moved_piece = attacked_squares.intersection(set(known_from.keys()).union(set(known_to.keys())))
-    known_moved_piece = list(known_moved_piece)[0]
-    return FogMove(
-        from_square=[square for square, piece in known_from.items() if piece == known_moved_piece][0] if known_moved_piece in known_from.values() else None,
-        to_square=[square for square, piece in known_to.items() if piece == known_moved_piece][0] if known_moved_piece in known_to.values() else None,
-        piece=known_moved_piece
-    )
+    moved_squares = attacked_squares.intersection(set(known_from.keys()).union(set(known_to.keys())))
+    if not moved_squares:
+        # no telling which piece moved: an unseen move, while the observed squares still update the tracking
+        return FogMove()
+    moved_square = sorted(moved_squares)[0]
+    if moved_square in known_from:
+        return FogMove(from_square=moved_square, to_square=None, piece=known_from[moved_square])
+    return FogMove(from_square=None, to_square=moved_square, piece=known_to[moved_square])

@@ -43,7 +43,7 @@ class Evaluator:
         return self._cache[fen]
 
     def top_moves(
-        self, board: chess.Board, count: int, moves: List[chess.Move] | None = None
+        self, board: chess.Board, count: int
     ) -> Dict[chess.Move, int]:
         """
         The side to move's ``count`` best of ``moves`` on ``board`` (all its FoW moves if None), best first, each with
@@ -51,7 +51,7 @@ class Evaluator:
         """
         sign = 1 if board.turn == chess.WHITE else -1
         scores = {}
-        for move in board.generate_pseudo_legal_moves() if moves is None else moves:
+        for move in board.generate_pseudo_legal_moves():
             after = board.copy(stack=False)
             after.push(move)
             scores[move] = self.score(after)
@@ -90,11 +90,11 @@ def material(board: chess.Board, color: chess.Color) -> int:
 
 @dataclass
 class SearchResult:
-    """The best move found, its value, and the value of every candidate searched."""
+    """The best move found, its score, and the score of every candidate searched."""
 
-    move: chess.Move | None
-    value: float
-    move_values: Dict[chess.Move, float] = field(default_factory=dict)
+    best_move: chess.Move | None
+    best_score: float
+    candidate_scores: Dict[chess.Move, float] = field(default_factory=dict)
 
 
 def search(
@@ -105,38 +105,41 @@ def search(
     aggressiveness: float | None = None,
 ) -> SearchResult:
     """
-    The best move of ``model``'s side, with the value of every candidate, all as White's scores: White picks the
-    highest and Black the lowest. The candidates are its ``num_top_moves`` top moves (of ``moves`` if given) on its
-    most likely board, each worth the ``aggressiveness`` percentile (mean if None) of its score over the side's
-    simulations, counted from the side's own end: higher picks moves more optimistically. On each simulation the move
-    is played, and the score is the engine's (``model``'s by default) unless the simulation has an opponent belief
-    state: then he sees the move and the score is his ``search`` value, so the recursion goes as deep as the nested
-    belief states.
+    Evaluate scores of top moves of ``model``'s side, and return the best one as well as the evaluation of all top candidates.
+    If ``moves`` are provided, consider these moves in addition to the top moves.
     """
     evaluator = evaluator or model.evaluator
     worst = -math.inf if model.color == chess.WHITE else math.inf
-    board = model.simulations[0].board.copy(stack=False)
-    board.turn = model.color
-    values = {}
-    for move in evaluator.top_moves(board, num_top_moves, moves):
-        scores = []
-        for simulation in model.simulations:
-            board_after_move = simulation.board.copy(stack=False)
-            board_after_move.turn = model.color
-            board_after_move.push(move)
-            opponent_bsm = simulation.opponent_bsm
-            # capturing the king ends the game
-            if opponent_bsm is None or board_after_move.king(opponent_bsm.color) is None:
-                scores.append(evaluator.score(board_after_move))
-                continue
-            opponent_bsm = opponent_bsm.branch()
-            opponent_bsm.update_opponent_move(board_after_move.generate_view(opponent_bsm.color))
-            scores.append(search(opponent_bsm, evaluator, None, num_top_moves, aggressiveness).value)
-        values[move] = aggregate(scores, model.color, aggressiveness)
-    if not values:
-        return SearchResult(move=None, value=worst)
-    best = (max if model.color == chess.WHITE else min)(values, key=values.get)
-    return SearchResult(move=best, value=values[best], move_values=values)
+    # end of recursion: no simulations, meaning we just randomly sample a board.
+    if not model.simulations:
+        board = model.sample_board(model.color)
+        scores_by_move = evaluator.top_moves(board, num_top_moves) if board else {}
+    else:
+        scores_by_move = {}
+        board = model.simulations[0].create_board(other=model.current_view.generate_piece_placement(), turn=model.color)
+        # legal moves are indifferent across model.simulations (same view gives same legal moves)
+        # use most likely board to get top moves so not to iterate all legal moves.
+        candidate_moves = list(evaluator.top_moves(board, num_top_moves).keys())
+        if moves is not None:
+            candidate_moves = list(set(candidate_moves + moves))
+        for move in candidate_moves:
+            scores = []
+            for simulation in model.simulations:
+                board_after_move = simulation.create_board(other=model.current_view.generate_piece_placement(),
+                                                             turn=model.color)
+                board_after_move.push(move)
+                # capturing the king ends the game
+                if board_after_move.king(simulation.color) is None:
+                    scores.append(evaluator.score(board_after_move))
+                    continue
+                opponent_bsm = simulation.branch()
+                opponent_bsm.update_opponent_move(board_after_move.generate_view(opponent_bsm.color))
+                scores.append(search(opponent_bsm, evaluator, None, num_top_moves, aggressiveness).best_score)
+            scores_by_move[move] = aggregate(scores, model.color, aggressiveness)
+    if not scores_by_move:
+        return SearchResult(best_move=None, best_score=worst)
+    best = (max if model.color == chess.WHITE else min)(scores_by_move, key=scores_by_move.get)
+    return SearchResult(best_move=best, best_score=scores_by_move[best], candidate_scores=scores_by_move)
 
 
 def aggregate(scores: List[float], color: chess.Color, percentile: float | None = None) -> float:

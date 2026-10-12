@@ -39,15 +39,15 @@ def test_search_returns_a_move_we_can_play_and_leaves_the_model_untouched():
     evaluator = Evaluator()
     model = BeliefStateModel(chess.WHITE, FoWChessBoard().generate_view(chess.WHITE), evaluator, sizes=(3, 2), seed=0)
     board = follow(model, ["e2e4", "g8f6"])
-    before = (model.display(), [simulation.board.fen() for simulation in model.simulations])
+    before = (model.display(), [simulation.pieces for simulation in model.simulations])
     result = Engine(evaluator, num_top_moves=2).search(model)
     assert result.move in set(board.generate_pseudo_legal_moves())
     assert len(result.move_values) == 2
-    assert (model.display(), [simulation.board.fen() for simulation in model.simulations]) == before
+    assert (model.display(), [simulation.pieces for simulation in model.simulations]) == before
 
 
 @requires_stockfish
-def test_one_ply_move_value_is_the_percentile_over_our_simulations():
+def test_move_value_is_the_percentile_over_our_simulations_of_the_opponent_search():
     evaluator = Evaluator()
     model = BeliefStateModel(chess.WHITE, FoWChessBoard().generate_view(chess.WHITE), evaluator, sizes=(4,), seed=0)
     follow(model, ["e2e4", "g8f6", "d2d4", "b8c6"])
@@ -56,7 +56,9 @@ def test_one_ply_move_value_is_the_percentile_over_our_simulations():
     for move, value in result.move_values.items():
         scores = []
         for simulation in model.simulations:
-            board = simulation.board.copy(stack=False)
+            board = simulation.create_board(other=model.current_view.generate_piece_placement(), turn=chess.WHITE)
             board.push(move)
-            scores.append(evaluator.score(board))
+            opponent = simulation.branch()
+            opponent.update_opponent_move(board.generate_view(chess.BLACK))
+            scores.append(search(opponent, evaluator, None, engine.num_top_moves).value)
         assert value == aggregate(scores, chess.WHITE, engine.aggressiveness)
