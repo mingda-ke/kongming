@@ -27,7 +27,7 @@ UNSAFE_FOR_ENGINE = (
 class Evaluator:
     """Engine scores of full boards in centipawns, cached by position, shared by the belief states and the search."""
 
-    def __init__(self, engine: Stockfish | None = None, depth: int = 4):
+    def __init__(self, engine: Stockfish | None = None, depth: int = 10):
         self.engine = engine or Stockfish(shutil.which("stockfish") or "stockfish", depth=depth)
         self._cache: Dict[str, int] = {}
 
@@ -110,12 +110,8 @@ def search(
     """
     evaluator = evaluator or model.evaluator
     worst = -math.inf if model.color == chess.WHITE else math.inf
-    # end of recursion: no simulations, meaning we just randomly sample a board.
-    if not model.simulations:
-        board = model.sample_board(model.color)
-        scores_by_move = evaluator.top_moves(board, num_top_moves) if board else {}
-    else:
-        scores_by_move = {}
+    scores_by_move = {}
+    if model.simulations:
         board = model.simulations[0].create_board(other=model.current_view.generate_piece_placement(), turn=model.color)
         # legal moves are indifferent across model.simulations (same view gives same legal moves)
         # use most likely board to get top moves so not to iterate all legal moves.
@@ -128,8 +124,9 @@ def search(
                 board_after_move = simulation.create_board(other=model.current_view.generate_piece_placement(),
                                                              turn=model.color)
                 board_after_move.push(move)
-                # capturing the king ends the game
-                if board_after_move.king(simulation.color) is None:
+                # capturing the king ends the game, and a leaf (end of recursion) is scored directly on the board
+                # of our pieces and its pieces
+                if simulation.is_leaf or board_after_move.king(simulation.color) is None:
                     scores.append(evaluator.score(board_after_move))
                     continue
                 opponent_bsm = simulation.branch()
@@ -138,8 +135,12 @@ def search(
             scores_by_move[move] = aggregate(scores, model.color, aggressiveness)
     if not scores_by_move:
         return SearchResult(best_move=None, best_score=worst)
-    best = (max if model.color == chess.WHITE else min)(scores_by_move, key=scores_by_move.get)
-    return SearchResult(best_move=best, best_score=scores_by_move[best], candidate_scores=scores_by_move)
+
+    if model.color == chess.WHITE:
+        best_move = max(scores_by_move, key=scores_by_move.get)
+    else:
+        best_move = min(scores_by_move, key=scores_by_move.get)
+    return SearchResult(best_move=best_move, best_score=scores_by_move[best_move], candidate_scores=scores_by_move)
 
 
 def aggregate(scores: List[float], color: chess.Color, percentile: float | None = None) -> float:

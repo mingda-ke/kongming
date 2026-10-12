@@ -43,6 +43,21 @@ def test_e4_e6_Bc4():
     assert model.piece_tracking.evolutions[SpecificPiece(piece_type=chess.PAWN, color=chess.BLACK, file=4)][0] == {chess.E6}, "E pawn should only be possible to advance to e6 after the move as e5 is empty"
     assert len(model.simulations[0].simulations)==3, "There should be 3 simulations on opponent BSM according to sizes"
 
+    # black: Nf6
+    nf6_move = chess.Move.from_uci("g8f6")
+    board.push(nf6_move)
+    model.update_opponent_move(view=board.generate_view(color=chess.WHITE))
+    assert len(model.simulations) == 10, "There should be 10 black simulations after Nf6"
+
+    assert all(
+        simulation.view.values[chess.E7] != chess.Piece(piece_type=chess.KING, color=chess.BLACK)
+        for simulation in model.simulations
+    ), "A black king on e7 is bad move and should not appear in any simulation"
+
+    assert all(
+        simulation.view.values[chess.G5] != chess.Piece(piece_type=chess.PAWN, color=chess.BLACK)
+        for simulation in model.simulations
+    ), "A black pawn on g5 is bad move and should not appear in any simulation"
 
 
 

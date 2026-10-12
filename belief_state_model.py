@@ -8,7 +8,7 @@ from typing import Dict, List, Sequence
 
 import chess
 
-from evaluator import Evaluator, search
+from evaluator import Evaluator, SearchResult, search
 from fow_rules import FoWRulesBoard
 from fow_board import apply_move_to_board, combined_board, pieces_of
 from fow_view import FogView, PiecePlacement, deduce_opponent_move
@@ -26,8 +26,8 @@ class BeliefStateModel:
     - ``simulations``: at most ``sizes[0]`` boards simulated move by move, most likely first, each being the
       opponent's own belief state on that board (sized by ``sizes[1:]``): his ``view`` holds all of his pieces and ours
       he can see, so it cannot leak where our unseen pieces are, and ``likelihood`` is how likely we believe it is.
-      Once ``sizes`` runs out, a belief state has no simulations and only its tracking, which ends the
-      recursion. The opponent moves
+      Once ``sizes`` runs out, a belief state is a leaf that ends the recursion: it keeps only its view (no
+      tracking nor simulations), and is scored on the board of its pieces and its believer's. The opponent moves
       by his belief: on each board, his ``num_of_top_moves`` moves from a ``search`` of his belief state, weighted
       by how likely a player of ``opponent_strength`` is to play each (see ``convert_score_to_probability``).
 
@@ -63,13 +63,15 @@ class BeliefStateModel:
         self.color = color
         self.opponent = not color
         view = view or FogView.initial(color=self.color)
-        self.tracking = tracking or PieceTrackingModel(color=self.color, view=view)
         self.likelihood = likelihood
 
         self.depth = depth
         self.path = path or f"{chess.COLOR_NAMES[color]} actual"
         self.evaluator = evaluator or Evaluator()
         self.sizes = tuple(sizes) or (0,)
+        # a leaf keeps only its view; any other belief state keeps it in its tracking
+        self._view = view
+        self.tracking = None if self.is_leaf else tracking or PieceTrackingModel(color=self.color, view=view)
         self.num_of_top_moves = num_of_top_moves
         self.opponent_strength = opponent_strength
         self.random = random.Random(seed)
@@ -79,12 +81,13 @@ class BeliefStateModel:
         # - opponent_knowledge is the opponent's tracking of our pieces with 100% certainty, used to generate new simulations for what opponent knows.
         #       - as conservative side, assuming all opponent pieces stay at initial stage until we know deterministic placement of opponent pieces.
         # - simulations is a list of opponent piece placements with their own opponent belief state (BeliefStateModel contains both info)
-        self.opponent_knowledge = PieceTrackingModel(color=self.opponent)
+        self.opponent_knowledge = None if self.is_leaf else PieceTrackingModel(color=self.opponent)
         self.simulations: List[BeliefStateModel] = self.generate_simulations(tries=self.sizes[0])
 
     def __repr__(self) -> str:
         return (f"<BSM {self.name} likelihood={self.likelihood:.4f} depth={self.depth} "
-                f"simulations={len(self.simulations)} unseen_moves={self.piece_tracking.invisible_move_count}>")
+                f"simulations={len(self.simulations)} "
+                f"unseen_moves={None if self.is_leaf else self.piece_tracking.invisible_move_count}>")
 
     def __eq__(self, other: object) -> bool:
         """Belief states are the same simulation when they see the same board."""
@@ -99,13 +102,21 @@ class BeliefStateModel:
         return "-".join(self.path)
 
     @property
+    def is_leaf(self) -> bool:
+        """Whether ``sizes`` ran out, so this belief state ends the recursion with only its view."""
+        return self.sizes[0] == 0
+
+    @property
     def view(self) -> FogView:
         """Our current view: all of our pieces and the opponent's we can see."""
-        return self.tracking.current_view
+        return self._view if self.is_leaf else self.tracking.current_view
 
     def update_view(self, view: FogView) -> None:
         """Set our current view to ``view`` without observing anything from it."""
-        self.tracking.update_view(view=view)
+        if self.is_leaf:
+            self._view = view
+        else:
+            self.tracking.update_view(view=view)
 
     @property
     def placement(self) -> PiecePlacement:
@@ -143,7 +154,7 @@ class BeliefStateModel:
 
     @property
     def current_view(self) -> FogView:
-        return self.tracking.current_view
+        return self.view
 
     @property
     def piece_tracking(self) -> PieceTracking:
@@ -157,7 +168,8 @@ class BeliefStateModel:
         """
         model = copy.copy(self)
         model.random = copy.copy(self.random)
-        model.tracking = self.tracking.hypothetical_copy()
+        if not self.is_leaf:
+            model.tracking = self.tracking.hypothetical_copy()
         model.simulations = [simulation.branch() for simulation in self.simulations]
         return model
 
@@ -170,8 +182,12 @@ class BeliefStateModel:
         """
         We made ``move``; ``view`` is our view after it. It is played on every simulated board (removing what it
         captured), the placements the updated tracking no longer allows are dropped, the opponent's belief on each
-        remaining one sees the move as an opponent move with his view there, and the simulations are refilled.
+        remaining one sees the move as an opponent move with his view there, and the simulations are refilled. A leaf
+        only takes ``view``.
         """
+        if self.is_leaf:
+            self.update_view(view=view)
+            return
         own_piece_placement_before_move = self.placement
         # update our belief state on opponent's pieces after our move which could observe new info.
         self.tracking.update_own_move(move=move, view=view)
@@ -214,8 +230,11 @@ class BeliefStateModel:
         our view are dropped, and refilled with half as many generated from the tracking with him to move. Then our tracking sees his move, and every simulation branches into one simulation
         per move of his ``num_of_top_moves`` that fits our view, with its likelihood times the move's probability
         (summing to 1 per simulation), seeing his own move. The branches the updated tracking allows are kept, the
-        ``sizes[0]`` most likely of them.
+        ``sizes[0]`` most likely of them. A leaf only takes ``view``.
         """
+        if self.is_leaf:
+            self.update_view(view=view)
+            return
         # first update new info exposed by the opponent's move.
         our_view = self.current_view
         our_piece_placement = our_view.generate_piece_placement()
@@ -239,9 +258,7 @@ class BeliefStateModel:
         simulations_post_move = []
         for simulation in simulations:
             valid_moves = [valid_move for sim, valid_move in valid_simulation_move_combinations if sim == simulation]
-            probabilities_by_move = move_probabilities(simulation=simulation, evaluator=self.evaluator,
-                                               moves=valid_moves, num_of_top_moves=self.num_of_top_moves,
-                                               strength=self.opponent_strength)
+            probabilities_by_move = self.move_probabilities(simulation=simulation, moves=valid_moves)
             board_of_simulation = simulation.create_board(other=our_piece_placement, turn=simulation.color)
             for move, move_probability in probabilities_by_move.items():
                 simulation_after_move = simulation.branch()
@@ -267,8 +284,12 @@ class BeliefStateModel:
             return None
         opponent_view = combined_board(own=opponent_placement, other=self.current_view.generate_piece_placement(),
                                        turn=self.opponent).generate_view(color=self.opponent)
-        opponent_piece_tracking = PieceTrackingModel(color=self.opponent, view=opponent_view,
-                                                     piece_tracking=self.opponent_knowledge.hypothetical_copy().piece_tracking)
+        opponent_piece_tracking = None
+        # a leaf opponent belief keeps only its view
+        if any(self.sizes[1:2]):
+            opponent_piece_tracking = PieceTrackingModel(
+                color=self.opponent, view=opponent_view,
+                piece_tracking=self.opponent_knowledge.hypothetical_copy().piece_tracking)
         new_path = (*self.path, f"{chess.COLOR_NAMES[self.opponent]} sim {number}")
         return BeliefStateModel(
                     color=self.opponent,
@@ -300,7 +321,7 @@ class BeliefStateModel:
         
         self.log("generating up to %d simulations", tries)
         simulations = [self.generate_simulation(seed=self.random.randrange(2**i), number=i) for i in range(tries)]
-        probabilities = simulation_probabilities(simulations=[sim for sim in simulations if sim is not None], evaluator=self.evaluator, num_of_top_moves=self.num_of_top_moves, strength=self.opponent_strength)
+        probabilities = self.simulation_probabilities(simulations=[sim for sim in simulations if sim is not None])
         for simulation in simulations:
             if simulation is not None:
                 simulation.likelihood = probabilities[simulation]
@@ -329,63 +350,45 @@ class BeliefStateModel:
             return []
         return sorted(simulations, key=lambda simulation: -simulation.likelihood)
 
+    def search_simulation(self, simulation: BeliefStateModel, moves: List[chess.Move] | None = None) -> SearchResult:
+        """
+        The opponent's ``search`` of his belief on ``simulation``; a leaf (end of recursion) is scored on the board of
+        our pieces and its pieces instead.
+        """
+        if simulation.is_leaf:
+            board = simulation.create_board(other=self.placement, turn=simulation.color)
+            scores = self.evaluator.top_moves(board=board, count=self.num_of_top_moves)
+            if not scores:
+                return SearchResult(best_move=None, best_score=-math.inf if simulation.color == chess.WHITE else math.inf)
+            best_move = next(iter(scores))
+            return SearchResult(best_move=best_move, best_score=scores[best_move], candidate_scores=scores)
+        return search(model=simulation, evaluator=self.evaluator, moves=moves, num_top_moves=self.num_of_top_moves)
+
     def simulation_score(self, simulation: BeliefStateModel) -> float:
         """White's value of ``simulation``: the value of the opponent's best move by a search of his belief on it."""
-        return search(model=simulation, evaluator=self.evaluator, moves=None,
-                      num_top_moves=self.num_of_top_moves).best_score
+        return self.search_simulation(simulation=simulation).best_score
 
-    def sample_placements(self, tries: int) -> List[PiecePlacement]:
-        """Up to ``tries`` placements of the opponent's pieces sampled from the tracking, new to the simulations."""
-        seen = [simulation.placement for simulation in self.simulations]
-        placements = []
-        for _ in range(tries):
-            placement = self.tracking.simulate_placement(rng=self.random)
-            if placement is not None and placement not in seen:
-                seen.append(placement)
-                placements.append(placement)
-        return placements
-
-    def sample_board(self, turn: chess.Color) -> chess.Board | None:
+    def move_probabilities(self, simulation: BeliefStateModel, moves: List[chess.Move]) -> Dict[chess.Move, float]:
         """
-        A board of the opponent's pieces on a placement sampled from the tracking and ours as in our view, with
-        ``turn`` to move; None when the sampling hits a dead end.
+        How likely the opponent (of ``opponent_strength``) is to play each of his ``num_of_top_moves`` best ``moves``
+        on ``simulation``, from their values in a search of his own belief state (see ``search_simulation``).
         """
-        placements = self.sample_placements(tries=1)
-        if not placements:
-            return None
-        return combined_board(own=placements[0], other=self.current_view.generate_piece_placement(), turn=turn)
+        scores = self.search_simulation(simulation=simulation, moves=moves).candidate_scores
+        probabilities = convert_score_to_probability(scores=list(scores.values()), color=self.opponent,
+                                                     strength=self.opponent_strength)
+        return {move: prob for move, prob in zip(scores.keys(), probabilities) if move in moves}
 
-
-def move_probabilities(simulation: BeliefStateModel, evaluator: Evaluator, moves: List[chess.Move],
-                       num_of_top_moves: int, strength: float) -> Dict[chess.Move, float]:
-    """
-    How likely ``simulation``'s side (of ``strength``) is to play each of his ``num_of_top_moves`` best ``moves``, from
-    their values in a ``search`` of his own belief state, which never sees the real board.
-    """
-    scores = search(model=simulation, evaluator=evaluator, moves=moves,
-                    num_top_moves=num_of_top_moves).candidate_scores
-    probabilities = convert_score_to_probability(scores=list(scores.values()), color=simulation.color,
-                                                 strength=strength)
-    return {move: prob for move, prob in zip(scores.keys(), probabilities) if move in moves}
-
-
-def simulation_probabilities(simulations: List[BeliefStateModel], evaluator: Evaluator, num_of_top_moves: int,
-                             strength: float) -> Dict[BeliefStateModel, float]:
-    """
-    The probabilities of each simulation in ``simulations`` being the correct one, based on their likelihoods and the
-    ``strength`` of the player.
-    """
-    if len(simulations) <= 1:
-        return dict.fromkeys(simulations, 1.0)
-
-    score_by_simulation = {}
-    for simulation in simulations:
-        score = search(model=simulation, evaluator=evaluator,
-                            num_top_moves=num_of_top_moves).best_score
-        score_by_simulation[simulation] = score
-    probabilities = convert_score_to_probability(scores=list(score_by_simulation.values()), color=simulation.color,
-                                                    strength=strength)
-    return dict(zip(simulations, probabilities))
+    def simulation_probabilities(self, simulations: List[BeliefStateModel]) -> Dict[BeliefStateModel, float]:
+        """
+        The probabilities of each simulation in ``simulations`` being the correct one, by the opponent's (of
+        ``opponent_strength``) best score on each (see ``simulation_score``).
+        """
+        if len(simulations) <= 1:
+            return dict.fromkeys(simulations, 1.0)
+        scores = [self.simulation_score(simulation=simulation) for simulation in simulations]
+        probabilities = convert_score_to_probability(scores=scores, color=self.opponent,
+                                                     strength=self.opponent_strength)
+        return dict(zip(simulations, probabilities))
 
 
 def get_view_aligned_moves(simulation: BeliefStateModel, view: FogView) -> List[chess.Move]:
