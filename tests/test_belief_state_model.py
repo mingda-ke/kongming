@@ -3,6 +3,7 @@
 import chess
 
 from belief_state_model import BeliefStateModel
+from fow_board import pieces_of
 from fow_chess import FoWChessBoard
 from piece_tracking import SpecificPiece
 
@@ -10,7 +11,7 @@ from piece_tracking import SpecificPiece
 def test_e4_e6_Bc4_Nf6():
     # Test the e4 move and its effect on the belief state model
     board = FoWChessBoard()
-    model = BeliefStateModel(color=chess.WHITE, sizes=(10, 3))
+    model = BeliefStateModel(color=chess.WHITE, sizes=(10, 3), num_of_top_moves=5, opponent_strength=100)
     
     # white: e4
     e4_move = chess.Move.from_uci("e2e4")
@@ -67,6 +68,29 @@ def test_e4_e6_Bc4_Nf6():
         for white_simulation in simulation.simulations
     ), "A black simulation with a pawn on c5 sees c4 blocked, so its white simulations should have a bishop or pawn on c4"
 
+    # White: Nf3
+    nf3_move = chess.Move.from_uci("g1f3")
+    board.push(nf3_move)
+    model.update_own_move(move=nf3_move, view=board.generate_view(color=chess.WHITE))
+    assert len(model.simulations) == 10, "There should be 10 black simulations after Nf3"
+
+    # Black: g6
+    # TODO: there's a known unintuitive retreating simulation as multiple original simulation leads to this and it's actually not too worse from best move.
+    g6_move = chess.Move.from_uci("g7g6")
+    board.push(g6_move)
+    model.update_opponent_move(view=board.generate_view(color=chess.WHITE))
+    assert len(model.simulations) == 10, "There should be 10 black simulations"
+
+    # Push remaining moves through the 20th ply
+    remaining_moves = ["e1g1", "f8g7", "d2d3", "e8g8", "b1c3", "d7d5", "e4d5", "e6d5", "c4b3", "c7c6", "f1e1", "b8d7", "c1g5", "h7h6"]
+    for uci in remaining_moves:
+        move = chess.Move.from_uci(uci)
+        board.push(move)
+        if board.turn == chess.BLACK:
+            model.update_own_move(move=move, view=board.generate_view(color=chess.WHITE))
+        else:
+            model.update_opponent_move(view=board.generate_view(color=chess.WHITE))
+    assert len(model.simulations) == 10, "There should be 10 black simulations after the 20th ply"
 
 
 if __name__ == "__main__":

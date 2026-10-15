@@ -27,7 +27,7 @@ UNSAFE_FOR_ENGINE = (
 class Evaluator:
     """Engine scores of full boards in centipawns, cached by position, shared by the belief states and the search."""
 
-    def __init__(self, engine: Stockfish | None = None, depth: int = 10):
+    def __init__(self, engine: Stockfish | None = None, depth: int = 5):
         self.engine = engine or Stockfish(shutil.which("stockfish") or "stockfish", depth=depth)
         self._cache: Dict[str, int] = {}
 

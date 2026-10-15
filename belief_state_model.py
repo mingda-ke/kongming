@@ -209,20 +209,30 @@ class BeliefStateModel:
             generated_simulations = self.generate_simulations(num_sims=self.sizes[0] - len(filtered_simulations) if dropped else 0)
         self.simulations = self.combine_simulations(simulation_set1=filtered_simulations, simulation_set2=generated_simulations)
 
-        # update opponent determined belief state (opponent_knowledge) no matter which simulation is the real.  
+        # only non-leaf simulations generate their opponent belief from the opponent knowledge
+        if any(self.sizes[1:2]):
+            self.update_opponent_knowledge(own_placement_before_move=own_piece_placement_before_move,
+                                           own_placement_after_move=own_piece_placement)
+
+        self.update_view(view=view)
+
+    def update_opponent_knowledge(self, own_placement_before_move: PiecePlacement,
+                                  own_placement_after_move: PiecePlacement) -> None:
+        """
+        Update the opponent's determined knowledge of our pieces (``opponent_knowledge``) after our move, no matter
+        which simulation is the real one: his minimum view before our move, then our move seen as his opponent's move.
+        """
         opponent_minimum_piece_placement = self.opponent_knowledge.current_view.generate_piece_placement().override_with(self.tracking.determined_opponent_placement())
         opponent_minimum_knowledge_board_ex_move = combined_board(
-            own=own_piece_placement_before_move,
+            own=own_placement_before_move,
             other=opponent_minimum_piece_placement,
             turn=self.opponent)
         self.opponent_knowledge.update_view(view=opponent_minimum_knowledge_board_ex_move.generate_view(color=self.opponent))
         opponent_minimum_knowledge_board_post_move = combined_board(
-            own=own_piece_placement, # our piece placement after the move.
+            own=own_placement_after_move,
             other=opponent_minimum_piece_placement,
             turn=self.opponent)
         self.opponent_knowledge.update_opponent_move(view=opponent_minimum_knowledge_board_post_move.generate_view(color=self.opponent))
-
-        self.update_view(view=view)
 
     def update_opponent_move(self, view: FogView) -> None:
         """

@@ -22,6 +22,7 @@ def replay_moves(moves: Iterable[chess.Move | str], color: chess.Color = chess.W
         view = board.generate_view(color)
         if mover == color:
             model.update_own_move(move, view)
+            model.update_view(view)
         else:
             model.update_opponent_move(view)
     return model
@@ -47,6 +48,15 @@ def test_sliding_piece_clears_its_path():
     assert tracking.determined_squares()[SpecificPiece(chess.WHITE, chess.QUEEN)] == chess.H5
     for square in (chess.E2, chess.F3, chess.G4):
         assert not tracking.candidates_at(None, square)
+
+
+def test_capture_from_seen_square_moves_the_capturer():
+    """
+    As white, the black d-pawn is seen on d5 and captures on e4: it left d5 for e4, so its square is e4, rather than
+    d5 being observed empty before the capture is applied, which would leave the pawn nowhere.
+    """
+    model = replay_moves(["e2e4", "d7d5", "b1c3", "d5e4"], color=chess.WHITE)
+    assert model.piece_tracking.possible_squares(SpecificPiece(chess.BLACK, chess.PAWN, 3)) == {chess.E4}
 
 
 def test_cleared_path_only_for_sliding_pieces():

@@ -141,6 +141,15 @@ def is_piece_move(piece: Piece, from_square: chess.Square, to_square: chess.Squa
     return any(move.to_square == to_square for move in board.generate_pseudo_legal_moves(from_mask=BB_SQUARES[from_square]))
 
 
+def can_piece_capture(piece: Piece, from_square: chess.Square, to_square: chess.Square) -> bool:
+    """Whether ``piece`` can capture from ``from_square`` on ``to_square`` on an otherwise empty board."""
+    board = chess.Board(None)
+    board.set_piece_at(from_square, piece)
+    board.set_piece_at(to_square, Piece(chess.PAWN, not piece.color))
+    board.turn = piece.color
+    return any(move.to_square == to_square for move in board.generate_pseudo_legal_moves(from_mask=BB_SQUARES[from_square]))
+
+
 def deduce_opponent_move(before: FogView, after: FogView) -> FogMove:
     """
     Deduce opponent move from two consecutive FogView snapshots by opponent move, i.e. opposite color of both FogView color.
@@ -166,10 +175,19 @@ def deduce_opponent_move(before: FogView, after: FogView) -> FogMove:
     if our_own_lost:
         lost_square = our_own_lost[0]
         view_of_lost_square = after.values[lost_square]
+        piece = view_of_lost_square if isinstance(view_of_lost_square, chess.Piece) else None
+        from_squares = [
+            square for square in changed
+            if isinstance(before.values[square], chess.Piece) and before.values[square].color != before.color
+            and after.values[square] == EMPTY_SQUARE
+            and (piece is None or before.values[square] == piece)
+            and can_piece_capture(before.values[square], square, lost_square)
+        ]
+        from_square = from_squares[0] if len(from_squares) == 1 else None
         return FogMove(
-            from_square=None,
+            from_square=from_square,
             to_square=lost_square,
-            piece=view_of_lost_square if isinstance(view_of_lost_square, chess.Piece) else None
+            piece=piece or (before.values[from_square] if from_square is not None else None),
         )
 
     # Non-capture move
