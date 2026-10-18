@@ -482,11 +482,22 @@ class PieceTrackingModel:
         """
         Our move is fully known; view is the new FogView after we make our move.
         """
-        capture_move = self._deduce_capture(self.current_view, move)
+        self.observe_own_move_squares(view=view)
+        self.apply_own_capture(move=move)
+
+    def observe_own_move_squares(self, view: FogView) -> None:
+        """
+        First step of our move: observe the opponent pieces and blocked squares of ``view`` (the view after it). A piece
+        the move captured is still tracked, as if it were there.
+        """
         self.apply_evidences([
-            capture_move,
-            *[observe_square(square, value) for square, value in enumerate(view.values) if (isinstance(value, chess.Piece) and value.color == self.opponent) or value== BLOCKED_PIECE],
+            observe_square(square, value) for square, value in enumerate(view.values)
+            if (isinstance(value, chess.Piece) and value.color == self.opponent) or value == BLOCKED_PIECE
         ])
+
+    def apply_own_capture(self, move: chess.Move) -> None:
+        """Second step of our move: remove the opponent piece ``move`` captured, deduced from the view before it."""
+        self.apply_evidences([self._deduce_capture(self.current_view, move)])
 
     def update_opponent_move(self, view: FogView) -> FogMove:
         """

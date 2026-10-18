@@ -47,7 +47,7 @@ class FoWRulesBoard(chess.Board):
             if visible_mask & chess.BB_SQUARES[square]:
                 piece = self.piece_at(square)
                 view[square] = piece if piece is not None else EMPTY_SQUARE
-            if blocked_mask & chess.BB_SQUARES[square]:
+            elif blocked_mask & chess.BB_SQUARES[square]:
                 view[square] = BLOCKED_PIECE
 
         return FogView(color=color, values=view)

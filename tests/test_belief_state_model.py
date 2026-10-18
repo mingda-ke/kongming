@@ -11,7 +11,7 @@ from piece_tracking import SpecificPiece
 def test_e4_e6_Bc4_Nf6():
     # Test the e4 move and its effect on the belief state model
     board = FoWChessBoard()
-    model = BeliefStateModel(color=chess.WHITE, sizes=(10, 3), num_of_top_moves=5, opponent_strength=100)
+    model = BeliefStateModel(color=chess.WHITE, seed=123, sizes=(10, 3), num_of_top_moves=5, opponent_strength=100)
     
     # white: e4
     e4_move = chess.Move.from_uci("e2e4")

@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Dict, List
 import chess
 from stockfish import Stockfish
 
+from fow_board import combined_board
+
 if TYPE_CHECKING:
     from belief_state_model import BeliefStateModel
 
@@ -112,7 +114,7 @@ def search(
     worst = -math.inf if model.color == chess.WHITE else math.inf
     scores_by_move = {}
     if model.simulations:
-        board = model.simulations[0].create_board(other=model.current_view.generate_piece_placement(), turn=model.color)
+        board = combined_board(own=model.simulations[0].placement, other=model.current_view.generate_piece_placement(), turn=model.color)
         # legal moves are indifferent across model.simulations (same view gives same legal moves)
         # use most likely board to get top moves so not to iterate all legal moves.
         candidate_moves = list(evaluator.top_moves(board, num_top_moves).keys())
@@ -121,8 +123,8 @@ def search(
         for move in candidate_moves:
             scores = []
             for simulation in model.simulations:
-                board_after_move = simulation.create_board(other=model.current_view.generate_piece_placement(),
-                                                             turn=model.color)
+                board_after_move = combined_board(own=simulation.placement, other=model.current_view.generate_piece_placement(),
+                                                  turn=model.color)
                 board_after_move.push(move)
                 # capturing the king ends the game, and a leaf (end of recursion) is scored directly on the board
                 # of our pieces and its pieces

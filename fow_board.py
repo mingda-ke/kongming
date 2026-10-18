@@ -6,7 +6,7 @@ from fow_rules import FoWRulesBoard
 from fow_view import PiecePlacement
 
 
-def combined_board(own: PiecePlacement, other: PiecePlacement, turn: chess.Color) -> chess.Board:
+def combined_board(own: PiecePlacement, other: PiecePlacement, turn: chess.Color) -> FoWRulesBoard:
     """The full board of both sides' placements, with ``turn`` to move."""
     board = FoWRulesBoard(fen=None)
     other.place_on(board=board)
@@ -16,7 +16,7 @@ def combined_board(own: PiecePlacement, other: PiecePlacement, turn: chess.Color
     return board
 
 
-def apply_move_to_board(board: chess.Board, move: chess.Move) -> chess.Board:
+def apply_move_to_board(board: FoWRulesBoard, move: chess.Move) -> FoWRulesBoard:
     """``board`` after ``move``."""
     result = board.copy(stack=False)
     result.push(move)

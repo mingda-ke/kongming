@@ -43,7 +43,7 @@ class BeliefStateModel:
         evaluator: Evaluator | None = None,
         sizes: Sequence[int] = (20, 3),
         num_of_top_moves: int = 10,
-        opponent_strength: float = 80.0,
+        opponent_strength: float = 100.0,
         seed: int | None = None,
         depth: int = 0,
         path: tuple[str] = ("actual",),
@@ -128,10 +128,6 @@ class BeliefStateModel:
         """The squares of our pieces and their types."""
         return self.placement.pieces
 
-    def create_board(self, other: PiecePlacement, turn: chess.Color) -> chess.Board:
-        """The full board of our pieces and the opponent's ``other``, with ``turn`` to move."""
-        return combined_board(own=self.placement, other=other, turn=turn)
-
     def next_simulation_name(self) -> str:
         self.simulation_count += 1
         return f"sim {self.simulation_count}"
@@ -180,39 +176,41 @@ class BeliefStateModel:
 
     def update_own_move(self, move: chess.Move, view: FogView) -> None:
         """
-        We made ``move``; ``view`` is our view after it. It is played on every simulated board (removing what it
-        captured), the placements the updated tracking no longer allows are dropped, the opponent's belief on each
-        remaining one sees the move as an opponent move with his view there, and the simulations are refilled. A leaf
-        only takes ``view``.
+        We made ``move``; ``view`` is our view after it. Before the move, our tracking observes what ``view`` shows
+        (a piece we captured is still tracked), the simulations whose board after the move does not give ``view`` are
+        dropped, and refilled from the tracking. Then the move is played on every simulated board (removing what it
+        captured), the opponent's belief on each one sees it as an opponent move with his view there, and our tracking
+        removes the captured piece. A leaf only takes ``view``.
         """
         if self.is_leaf:
             self.update_view(view=view)
             return
-        own_piece_placement_before_move = self.placement
-        # update our belief state on opponent's pieces after our move which could observe new info.
-        self.tracking.update_own_move(move=move, view=view)
 
-        # update simulations: filter consistent simulations
-        own_piece_placement = view.generate_piece_placement()
-        filtered_simulations = []
-        for simulation in self.simulations:
-            board_after_move = simulation.create_board(other=own_piece_placement, turn=self.color)
-            if board_after_move.generate_view(color=self.color) == view:
-                opponent_view_after_move = board_after_move.generate_view(color=self.opponent)
-                simulation.update_opponent_move(view=opponent_view_after_move)
-                filtered_simulations.append(simulation)
+        # first update new info exposed by our move, keeping a piece it captured.
+        self.tracking.observe_own_move_squares(view=view)
 
-        dropped = len(self.simulations) - len(filtered_simulations)
-        generated_simulations = []
-        if dropped: # only regenerate simulations when some were dropped.
-            self.log("filtered %d simulations: no longer allowed by the tracking", dropped)
-            generated_simulations = self.generate_simulations(num_sims=self.sizes[0] - len(filtered_simulations) if dropped else 0)
-        self.simulations = self.combine_simulations(simulation_set1=filtered_simulations, simulation_set2=generated_simulations)
+        # filter the simulations consistent with the view after the move
+        simulations = [simulation for simulation in self.simulations if does_move_fit_view(our_placement=self.placement, opponent_placement=simulation.placement, move=move, color=self.color, view=view)]
+
+        # refill simulations when some were dropped, generated simulations are based on updated piece_tracking so in principle aligns with view.
+        dropped = len(self.simulations) - len(simulations)
+        if dropped:
+            self.log("filtered %d simulations: not fitting our view after the move", dropped)
+            generated_simulations = self.generate_simulations(num_sims=dropped)
+            simulations = self.combine_simulations(simulation_set1=simulations, simulation_set2=generated_simulations)
+
+        # play the move on every simulation, the opponent seeing it as his opponent's move
+        for simulation in simulations:
+            opponent_view = apply_move_to_board(combined_board(own=self.placement, other=simulation.placement, turn=self.color), move=move).generate_view(simulation.color)
+            simulation.update_opponent_move(view=opponent_view)
+        self.simulations = simulations
+
+        self.tracking.apply_own_capture(move=move)
 
         # only non-leaf simulations generate their opponent belief from the opponent knowledge
         if any(self.sizes[1:2]):
-            self.update_opponent_knowledge(own_placement_before_move=own_piece_placement_before_move,
-                                           own_placement_after_move=own_piece_placement)
+            self.update_opponent_knowledge(own_placement_before_move=self.placement,
+                                           own_placement_after_move=view.generate_piece_placement())
 
         self.update_view(view=view)
 
@@ -251,8 +249,8 @@ class BeliefStateModel:
         fog_move = deduce_opponent_move(before=our_view, after=view)
         self.tracking.observe_discovered_squares(view=view, fog_move=fog_move)  
 
-        # filter the simulations before the move: some moves of his must fit our view
-        valid_simulation_move_combinations: List[tuple[BeliefStateModel, chess.Move]] = [(simulation, valid_move) for simulation in self.simulations for valid_move in get_view_aligned_moves(simulation=simulation, view=our_view)]
+        # filter the simulations before the move: some moves of his must fit our view after the move
+        valid_simulation_move_combinations: List[tuple[BeliefStateModel, chess.Move]] = [(simulation, valid_move) for simulation in self.simulations for valid_move in get_view_aligned_moves(simulation=simulation, view_before=our_view, view_after=view)]
         simulations = list({simulation for simulation, _ in valid_simulation_move_combinations})
 
         # refill simluations when there's deficit
@@ -260,7 +258,7 @@ class BeliefStateModel:
         if len(dropped_simulations) > 0 and len(valid_simulation_move_combinations) < self.sizes[0]:
             generated_simulations = self.generate_simulations(num_sims=len(dropped_simulations))
             combined_simulations = self.combine_simulations(simulation_set1=simulations, simulation_set2=generated_simulations)
-            valid_simulation_move_combinations += [(simulation, valid_move) for simulation in set(combined_simulations).difference(simulations) for valid_move in get_view_aligned_moves(simulation=simulation, view=our_view)]
+            valid_simulation_move_combinations += [(simulation, valid_move) for simulation in set(combined_simulations).difference(simulations) for valid_move in get_view_aligned_moves(simulation=simulation, view_before=our_view, view_after=view)]
             simulations = combined_simulations
 
         # for each simulation, assign probability of valid moves and explode into new simulations
@@ -269,7 +267,7 @@ class BeliefStateModel:
         for simulation in simulations:
             valid_moves = [valid_move for sim, valid_move in valid_simulation_move_combinations if sim == simulation]
             probabilities_by_move = self.move_probabilities(simulation=simulation, moves=valid_moves)
-            board_of_simulation = simulation.create_board(other=our_piece_placement, turn=simulation.color)
+            board_of_simulation = combined_board(own=simulation.placement, other=our_piece_placement, turn=simulation.color)
             for move, move_probability in probabilities_by_move.items():
                 if move == chess.Move.from_uci("c7c5"):
                     pass
@@ -312,7 +310,7 @@ class BeliefStateModel:
                     sizes=self.sizes[1:],
                     num_of_top_moves=self.num_of_top_moves,
                     opponent_strength=self.opponent_strength,
-                    seed=seed,
+                    seed=seed+1,
                     depth=self.depth + 1,
                     path=new_path,
                     likelihood=1.0,
@@ -370,7 +368,7 @@ class BeliefStateModel:
         our pieces and its pieces instead.
         """
         if simulation.is_leaf:
-            board = simulation.create_board(other=self.placement, turn=simulation.color)
+            board = combined_board(own=simulation.placement, other=self.placement, turn=simulation.color)
             scores = self.evaluator.top_moves(board=board, count=self.num_of_top_moves)
             if not scores:
                 return SearchResult(best_move=None, best_score=-math.inf if simulation.color == chess.WHITE else math.inf)
@@ -405,13 +403,23 @@ class BeliefStateModel:
         return dict(zip(simulations, probabilities))
 
 
-def get_view_aligned_moves(simulation: BeliefStateModel, view: FogView) -> List[chess.Move]:
-    """Return the list of moves that leave ``view``'s side with exactly ``view``."""
-    board = combined_board(own=view.generate_piece_placement(), other=simulation.current_view.generate_piece_placement(), turn=simulation.color)
+def does_move_fit_view(our_placement: PiecePlacement, opponent_placement: PiecePlacement, move: chess.Move, color: chess.Color,
+              view: FogView) -> bool:
+    """Whether ``move`` from ``color`` side played gives ``view`` from our perspective."""
+    board = combined_board(own=our_placement, other=opponent_placement, turn=color)
+    return apply_move_to_board(board=board, move=move).generate_view(color=color) == view
+
+
+def get_view_aligned_moves(simulation: BeliefStateModel, view_before: FogView, view_after: FogView) -> List[chess.Move]:
+    """
+    Return the moves of ``simulation`` that turn ``view_before``'s side's view into exactly ``view_after``. The board
+    is built from the pieces before the move, so a piece the move captures is still on it.
+    """
+    board = combined_board(own=view_before.generate_piece_placement(), other=simulation.current_view.generate_piece_placement(), turn=simulation.color)
     aligned_moves = []
     for move in board.generate_pseudo_legal_moves():
         board_after_move = apply_move_to_board(board=board, move=move)
-        if board_after_move.generate_view(color=view.color).values == view.values:
+        if board_after_move.generate_view(color=view_after.color).values == view_after.values:
             aligned_moves.append(move)
     return aligned_moves
 
@@ -420,8 +428,8 @@ def convert_score_to_probability(scores: List[float], color: chess.Color, streng
     """
     How likely the ``color`` player of ``strength`` (non-negative) is to pick each option of ``scores`` (White's
     centipawns, so Black prefers the lower): a softmax
-    at temperature 10000 / (strength * ln 2) centipawns, so every ``10000 / strength`` centipawns more doubles the
-    likelihood: 0 strength makes all options equally likely and 100 strength makes an option 100 centipawns better
+    at temperature 5000 / (strength * ln 2) centipawns, so every ``5000 / strength`` centipawns more doubles the
+    likelihood: 0 strength makes all options equally likely and 100 strength makes an option 50 centipawns better
     twice as likely.
     """
     if not scores:
@@ -429,7 +437,7 @@ def convert_score_to_probability(scores: List[float], color: chess.Color, streng
     if color == chess.BLACK:
         scores = [-score for score in scores]
     best = max(scores)
-    weights = [math.exp(strength * math.log(2) * (score - best) / 10000) for score in scores]
+    weights = [math.exp(strength * math.log(2) * (score - best) / 5000) for score in scores]
     total = sum(weights)
     return [weight / total for weight in weights]
 
@@ -496,10 +504,10 @@ if __name__ == "__main__":
         real = " (real)" if simulation.pieces == pieces_of(board=board, color=model.opponent) else ""
         print(f"\n{simulation.likelihood:.3f}{real}")
         ours = model.current_view.generate_piece_placement()
-        print(simulation.create_board(other=ours, turn=board.turn).unicode(invert_color=True, empty_square="⭘"))
+        print(combined_board(own=simulation.placement, other=ours, turn=board.turn).unicode(invert_color=True, empty_square="⭘"))
         theirs = simulation
         if theirs.simulations:
             print("as the opponent believes it:")
-            believed = theirs.simulations[0].create_board(other=theirs.current_view.generate_piece_placement(),
-                                                          turn=board.turn)
+            believed = combined_board(own=theirs.simulations[0].placement, other=theirs.current_view.generate_piece_placement(),
+                                      turn=board.turn)
             print(believed.unicode(invert_color=True, empty_square="⭘"))

@@ -3,6 +3,7 @@ import chess
 from belief_state_model import BeliefStateModel
 from engine import Engine
 from evaluator import Evaluator, aggregate, search
+from fow_board import combined_board
 from fow_chess import FoWChessBoard
 from tests.helpers import FakeEngine, requires_stockfish
 from tests.test_belief_state_model import follow
@@ -56,7 +57,7 @@ def test_move_value_is_the_percentile_over_our_simulations_of_the_opponent_searc
     for move, value in result.move_values.items():
         scores = []
         for simulation in model.simulations:
-            board = simulation.create_board(other=model.current_view.generate_piece_placement(), turn=chess.WHITE)
+            board = combined_board(own=simulation.placement, other=model.current_view.generate_piece_placement(), turn=chess.WHITE)
             board.push(move)
             opponent = simulation.branch()
             opponent.update_opponent_move(board.generate_view(chess.BLACK))
