@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Dict, List
 import chess
 from stockfish import Stockfish
 
+from config import BeliefStateConfig
 from fow_board import combined_board
 
 if TYPE_CHECKING:
@@ -92,11 +93,20 @@ def material(board: chess.Board, color: chess.Color) -> int:
 
 @dataclass
 class SearchResult:
-    """The best move found, its score, and the score of every candidate searched."""
+    """``color``'s White scores of each candidate move on each simulation, and the likelihoods of the simulations."""
+
+    color: chess.Color
+    score_matrix: Dict[chess.Move, List[float]] = field(default_factory=dict)
+    simulation_likelihoods: List[float] = field(default_factory=list)
+
+
+@dataclass
+class MoveDecision:
+    """The move decided, its score, and how likely each candidate move is to be played."""
 
     best_move: chess.Move | None
-    best_score: float
-    candidate_scores: Dict[chess.Move, float] = field(default_factory=dict)
+    score: float
+    move_probabilities: Dict[chess.Move, float] = field(default_factory=dict)
 
 
 def search(
@@ -104,15 +114,14 @@ def search(
     evaluator: Evaluator | None = None,
     moves: List[chess.Move] | None = None,
     num_top_moves: int = 4,
-    aggressiveness: float | None = None,
 ) -> SearchResult:
     """
-    Evaluate scores of top moves of ``model``'s side, and return the best one as well as the evaluation of all top candidates.
+    
     If ``moves`` are provided, consider these moves in addition to the top moves.
     """
     evaluator = evaluator or model.evaluator
-    worst = -math.inf if model.color == chess.WHITE else math.inf
-    scores_by_move = {}
+
+    scores_by_move_simulation = {}
     if model.simulations:
         board = combined_board(own=model.simulations[0].placement, other=model.current_view.generate_piece_placement(), turn=model.color)
         # legal moves are indifferent across model.simulations (same view gives same legal moves)
@@ -126,36 +135,50 @@ def search(
                 board_after_move = combined_board(own=simulation.placement, other=model.current_view.generate_piece_placement(),
                                                   turn=model.color)
                 board_after_move.push(move)
-                # capturing the king ends the game, and a leaf (end of recursion) is scored directly on the board
+                # a leaf (end of recursion) is scored directly on the board
                 # of our pieces and its pieces
                 if simulation.is_leaf or board_after_move.king(simulation.color) is None:
                     scores.append(evaluator.score(board_after_move))
                     continue
                 opponent_bsm = simulation.branch()
                 opponent_bsm.update_opponent_move(board_after_move.generate_view(opponent_bsm.color))
-                scores.append(search(opponent_bsm, evaluator, None, num_top_moves, aggressiveness).best_score)
-            scores_by_move[move] = aggregate(scores, model.color, aggressiveness)
-    if not scores_by_move:
-        return SearchResult(best_move=None, best_score=worst)
+                search_result = search(opponent_bsm, evaluator, None, num_top_moves)
+                scores.append(decide_move(search_result=search_result, config=opponent_bsm.config).score)
+            scores_by_move_simulation[move] = scores
+    if not scores_by_move_simulation:
+        return SearchResult(color=model.color)
 
-    if model.color == chess.WHITE:
-        best_move = max(scores_by_move, key=scores_by_move.get)
-    else:
-        best_move = min(scores_by_move, key=scores_by_move.get)
-    return SearchResult(best_move=best_move, best_score=scores_by_move[best_move], candidate_scores=scores_by_move)
+    return SearchResult(color=model.color, score_matrix=scores_by_move_simulation, simulation_likelihoods=[sim.likelihood for sim in model.simulations])
 
 
-def aggregate(scores: List[float], color: chess.Color, percentile: float | None = None) -> float:
+def decide_move(search_result: SearchResult, config: BeliefStateConfig = BeliefStateConfig()) -> MoveDecision:
     """
-    The mean of ``scores`` (White's), or their ``percentile`` if set (linear interpolation) counted from ``color``'s
-    end: from the lowest for White and from the highest for Black.
+    Decide best move to play based on score matrix (score by move and simulation):
+
+    Per simulation, take the ``config.num_of_moves_per_sim`` top scored moves and softmax them, so that a move
+    100 centipawns worse than the top one is ``config.softmax_prob_per_100_cp`` times less likely. Multiply these by
+    the simulation likelihood and sum them up per move, then pick the move with the highest summed likelihood.
+
+    Future enhancement: based on maximizing winning probability.
     """
-    if percentile is None:
-        return sum(scores) / len(scores)
-    if color == chess.BLACK:
-        percentile = 100 - percentile
-    ordered = sorted(scores)
-    position = (len(ordered) - 1) * percentile / 100
-    lower = math.floor(position)
-    upper = min(lower + 1, len(ordered) - 1)
-    return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+    score_matrix, color = search_result.score_matrix, search_result.color
+    if not score_matrix:
+        return MoveDecision(best_move=None, score=-MATE_SCORE if color == chess.WHITE else MATE_SCORE)
+    likelihoods = search_result.simulation_likelihoods
+    if sum(likelihoods) <= 0:
+        likelihoods = [1.0] * len(likelihoods)
+    sign = 1 if color == chess.WHITE else -1
+    move_probabilities = dict.fromkeys(score_matrix, 0.0)
+    for sim_index, sim_likelihood in enumerate(likelihoods):
+        top_moves = sorted(score_matrix, key=lambda move: -sign * score_matrix[move][sim_index])[:config.num_of_moves_per_sim]
+        top_score = sign * score_matrix[top_moves[0]][sim_index]
+        weights = {move: config.softmax_prob_per_100_cp ** ((sign * score_matrix[move][sim_index] - top_score) / 100)
+                   for move in top_moves}
+        weight_sum = sum(weights.values())
+        for move, weight in weights.items():
+            move_probabilities[move] += sim_likelihood * weight / weight_sum
+    total = sum(likelihoods)
+    move_probabilities = {move: likelihood / total for move, likelihood in move_probabilities.items()}
+    best_move = max(move_probabilities, key=move_probabilities.get)
+    avg_score = sum(likelihood * score for likelihood, score in zip(likelihoods, score_matrix[best_move])) / total
+    return MoveDecision(best_move=best_move, score=avg_score, move_probabilities=move_probabilities)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import chess
 
 from belief_state_model import BeliefStateModel
+from config import BeliefStateConfig
 from evaluator import Evaluator, SearchResult, search
 
 
@@ -32,7 +33,7 @@ if __name__ == "__main__":
     engine = Engine(evaluator, num_top_moves=4, aggressiveness=25)
     for sizes in ((20,), (20, 3), (20, 3, 2)):
         board = FoWChessBoard()
-        model = BeliefStateModel(chess.WHITE, board.generate_view(chess.WHITE), evaluator, sizes=sizes, seed=0)
+        model = BeliefStateModel(chess.WHITE, board.generate_view(chess.WHITE), evaluator, config=BeliefStateConfig(sizes=sizes), seed=0)
         for uci in ["e2e4", "g8f6", "d2d4", "b8c6", "d4d5", "c6e5", "f2f4", "e5g6"]:
             move = chess.Move.from_uci(uci)
             mover = board.turn
